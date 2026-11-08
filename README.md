@@ -31,7 +31,7 @@ BINTEUM_ANDROID_SDK=/path/to/android-sdk \
 ./scripts/gradle.sh :core:test :app:assembleDebug :app:lintDebug
 ```
 
-JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 직접 사용해도 됩니다. GitHub CI는 이 경로를 사용하며 원격 CI 실행은 아직 확인하지 않았습니다.
+JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 직접 사용해도 됩니다. GitHub CI도 같은 테스트·빌드·lint 명령을 실행하며 결과는 저장소의 Actions 화면에서 확인합니다.
 
 ## 프로젝트 구성
 
