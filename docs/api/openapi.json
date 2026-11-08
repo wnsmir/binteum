@@ -1,0 +1,1975 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://spec.openapis.org/oas/3.1/dialect/base",
+  "info": {
+    "title": "빈틈의실 BFF — 제안 계약, 미구현",
+    "version": "0.1.0-draft",
+    "description": "계획 검토용 OpenAPI 계약이다. 서버·엔드포인트·제공자 연결은 배포/구현되지 않았고 호출할 실서비스가 없다. example.invalid는 예약된 예시 주소다. 제공자 가입·앱 활성화·약관/결제 승인·키 발급·실응답/차량 지원 검증을 완료하기 전에는 합성 fixture만 사용한다. 앱 로컬 추천·선호 저장·차량 SDK/SOC/UX 제한은 HTTP 기능이 아니며 이 계약에 포함하지 않는다. 카카오 장소+도보를 기본 공급자 후보로 두고 TMAP은 기술 스파이크 대안으로 둔다. 실제 지원 여부와 폰 알림/차량 백그라운드 실행은 별도 검증 사항이다."
+  },
+  "servers": [
+    {
+      "url": "https://example.invalid",
+      "description": "미배포 예시. 실행 가능한 API가 아님."
+    }
+  ],
+  "security": [
+    {
+      "AppSession": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "activities",
+      "description": "자체 작성 활동 콘텐츠 목록"
+    },
+    {
+      "name": "media",
+      "description": "서버 curated YouTube 후보의 메타데이터 검증 계획"
+    },
+    {
+      "name": "places",
+      "description": "공급자 장소 검색 어댑터 계획"
+    },
+    {
+      "name": "outings",
+      "description": "단일 목적지 왕복 도보 시간 검증 스파이크"
+    }
+  ],
+  "paths": {
+    "/v1/activities": {
+      "get": {
+        "operationId": "listActivities",
+        "tags": [
+          "activities"
+        ],
+        "summary": "자체 활동 목록",
+        "description": "외부 API 없이 편집한 콘텐츠를 제공하는 제안 계약. 기기 안 추천과 차량 안전 판정은 클라이언트가 별도로 수행한다.",
+        "responses": {
+          "200": {
+            "description": "정상 처리. 빈 결과·부분 결과·외출 UNKNOWN은 각 응답 상태로 구분한다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivitiesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "입력 범위/형식 오류. 원본 좌표나 요청 본문을 오류 메시지에 복사하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "앱 단기 세션 없음/만료. 제공자 키를 클라이언트에 요구하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "기능 플래그/승인이 꺼져 있음. 아직 구현되지 않은 제공자를 사용 가능하다고 가장하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "앱 또는 제공자 rate limit/쿼터 초과. 반복 무제한 재시도 금지.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "내부 오류. stack trace/자격증명/개인정보 미노출.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "상류 네트워크/timeout/제공자 미설정/미지원. API 경로가 없다는 404와 다르다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "timeBudgetSec",
+            "in": "query",
+            "required": false,
+            "description": "정리 버퍼를 제외하고 사용할 수 있는 시간. 생략하면 전체 목록.",
+            "schema": {
+              "type": "integer",
+              "description": "초",
+              "minimum": 1,
+              "maximum": 14400
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "목록 크기",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 10
+            }
+          }
+        ]
+      }
+    },
+    "/v1/media/youtube/candidates": {
+      "post": {
+        "operationId": "findYoutubeCandidates",
+        "externalDocs": {
+          "description": "YouTube videos의 duration/embeddable 공식 필드. embeddable도 실제 재생을 보장하지 않는다.",
+          "url": "https://developers.google.com/youtube/data/reference/rest/v3/videos"
+        },
+        "tags": [
+          "media"
+        ],
+        "summary": "curated 미디어 후보 확인",
+        "description": "사용자 계정이나 개인 시청 히스토리를 받지 않는다. 서버 큐레이션 ID에 대해 duration/embeddable/가용성 등을 확인한다. 누락된 메타데이터와 실제 차내 재생 지원을 구분하고, 지원 미검증 시 metadata-only/폰으로 열기 fallback을 표시한다. 영상 메타데이터 길이가 실제 소비 시간이라는 보장은 없다.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaCandidatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "정상 처리. 빈 결과·부분 결과·외출 UNKNOWN은 각 응답 상태로 구분한다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaCandidatesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "입력 범위/형식 오류. 원본 좌표나 요청 본문을 오류 메시지에 복사하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "앱 단기 세션 없음/만료. 제공자 키를 클라이언트에 요구하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "기능 플래그/승인이 꺼져 있음. 아직 구현되지 않은 제공자를 사용 가능하다고 가장하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "앱 또는 제공자 rate limit/쿼터 초과. 반복 무제한 재시도 금지.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "내부 오류. stack trace/자격증명/개인정보 미노출.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "상류 네트워크/timeout/제공자 미설정/미지원. API 경로가 없다는 404와 다르다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/places/search": {
+      "post": {
+        "operationId": "searchPlaces",
+        "tags": [
+          "places"
+        ],
+        "summary": "주변 장소 후보 검색",
+        "description": "위치 요청은 해당 응답 생성 범위에서만 처리하며 영구 보관·위치 히스토리·원시 응답 로그에 저장하지 않는다. 공급자 키는 서버에 둔다. 카페/편의점은 제공자 분류, 간식/공원은 확인된 키워드 및 분류로 찾는다. 영업정보 미제공은 UNKNOWN이며, 빈 결과는 COMPLETE/EMPTY, 일부 실패는 PARTIAL, 전체 상류 실패는 503이다. PlaceRef는 현재 앱 세션에 묶인 단기 참조이며 메모리 보관/전달도 제공자 조건 확인 후 구현한다.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaceSearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "정상 처리. 빈 결과·부분 결과·외출 UNKNOWN은 각 응답 상태로 구분한다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaceSearchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "입력 범위/형식 오류. 원본 좌표나 요청 본문을 오류 메시지에 복사하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "앱 단기 세션 없음/만료. 제공자 키를 클라이언트에 요구하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "기능 플래그/승인이 꺼져 있음. 아직 구현되지 않은 제공자를 사용 가능하다고 가장하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "앱 또는 제공자 rate limit/쿼터 초과. 반복 무제한 재시도 금지.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "내부 오류. stack trace/자격증명/개인정보 미노출.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "상류 네트워크/timeout/제공자 미설정/미지원. API 경로가 없다는 404와 다르다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/outings/preview": {
+      "post": {
+        "operationId": "previewOuting",
+        "tags": [
+          "outings"
+        ],
+        "summary": "단일 목적지 외출 시간 검토",
+        "description": "출발→목적지와 목적지→출발 도보 경로를 각각 요청한다. totalSec=outboundSec+inboundSec+staySec+bufferSec. 경로를 직선거리나 LLM 생성 좌표로 대신하지 않는다. 한 방향이라도 timeout/미확인이면 UNKNOWN이며 feasible는 null, totalSec도 null이다. 이 응답의 feasible는 경로·시간 적합성만 뜻한다. 차량 UX 제한/실제 충전 데이터·사용자 위치·폰 연결·영업 여부·현장 보행 안전은 앱의 별도 허용 조건이다. 충전소 좌표는 복귀 기준점이며 휴대폰 현재 위치가 아니다. 출발=도착인 순환 산책은 이 계약에 포함하지 않는다.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutingPreviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "양방향 성공은 READY/NOT_FEASIBLE. 한 방향 실패·좌표 신선도/정확도 부족은 UNKNOWN. 전체 공급자 호출 불능은 503. 재시도 가능한 실패를 외출 가능으로 바꾸지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutingPreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "입력 범위/형식 오류. 원본 좌표나 요청 본문을 오류 메시지에 복사하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "앱 단기 세션 없음/만료. 제공자 키를 클라이언트에 요구하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "기능 플래그/승인이 꺼져 있음. 아직 구현되지 않은 제공자를 사용 가능하다고 가장하지 않는다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "장소 참조가 다른 앱 세션 소유이거나 만료/확인 불가. 404 endpoint 부재와 구분한다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "앱 또는 제공자 rate limit/쿼터 초과. 반복 무제한 재시도 금지.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "내부 오류. stack trace/자격증명/개인정보 미노출.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "상류 네트워크/timeout/제공자 미설정/미지원. API 경로가 없다는 404와 다르다.",
+            "headers": {
+              "Cache-Control": {
+                "description": "위치 및 선택 세션 응답을 공유 캐시에 저장하지 않는다.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "description": "서버가 재시도 가능 시점을 알 때만 초 단위로 제공.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AppSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "짧은 수명의 자체 앱 세션 토큰. 발급·갱신 방법은 별도 인증 설계 항목이다. Kakao/TMAP/YouTube 제공자 키나 사용자 YouTube OAuth 토큰이 아니다."
+      }
+    },
+    "schemas": {
+      "UtcTimestamp": {
+        "type": "string",
+        "description": "UTC RFC3339 시각. Z로 끝나야 한다.",
+        "format": "date-time",
+        "pattern": "Z$",
+        "example": "2026-11-08T03:00:00Z"
+      },
+      "Coordinate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "longitude": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180,
+            "description": "WGS84 경도. 공급자 x와 대응."
+          },
+          "latitude": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90,
+            "description": "WGS84 위도. 공급자 y와 대응."
+          }
+        },
+        "required": [
+          "longitude",
+          "latitude"
+        ]
+      },
+      "LocationFix": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "coordinate": {
+            "$ref": "#/components/schemas/Coordinate"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "VEHICLE_GPS",
+              "PHONE_GPS",
+              "USER_SELECTED",
+              "MOCK"
+            ],
+            "description": "차량 위치와 폰 위치를 구분한다. USER_SELECTED와 MOCK은 실제 현재 위치 증거가 아니다."
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "accuracyMeters": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "수평 위치 정확도. 알 수 없으면 null. 정밀 위치로 간주하지 않는다."
+          }
+        },
+        "required": [
+          "coordinate",
+          "source",
+          "observedAt",
+          "accuracyMeters"
+        ]
+      },
+      "ResultMeta": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "description": "로그 상관관계용 임의 ID. 개인/차량 식별자 또는 좌표를 포함하지 않는다.",
+            "maxLength": 128
+          },
+          "generatedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "COMPLETE",
+              "PARTIAL",
+              "UNAVAILABLE"
+            ],
+            "description": "일부 공급자 결과 실패는 PARTIAL. 모든 결과를 구할 수 없으면 503 ErrorResponse. 결과 0건인 정상 완료는 COMPLETE이며 문제없는 EMPTY 상태로 구분한다."
+          },
+          "warnings": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            }
+          }
+        },
+        "required": [
+          "requestId",
+          "generatedAt",
+          "status",
+          "warnings"
+        ]
+      },
+      "Warning": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "METADATA_MISSING",
+              "PROVIDER_PARTIAL_FAILURE",
+              "PROVIDER_UNSUPPORTED",
+              "OPENING_STATUS_UNKNOWN",
+              "VEHICLE_PLAYBACK_UNVERIFIED",
+              "ESTIMATED_DURATION",
+              "ROUTE_PARTIAL_FAILURE"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "사용자에게 표시할 수 있는 설명. 원본 공급자 오류/키/좌표는 넣지 않는다.",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "Activity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "자체 콘텐츠 ID",
+            "maxLength": 80
+          },
+          "title": {
+            "type": "string",
+            "description": "활동 제목",
+            "maxLength": 120
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "BREATHING",
+              "GENTLE_STRETCH",
+              "LEARNING",
+              "REFLECTION",
+              "QUIET_REST"
+            ]
+          },
+          "plannedDurationSec": {
+            "type": "integer",
+            "description": "자체 편집 콘텐츠의 계획 시간이며 실제 완료 시간 보장이 아니다.",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "durationBasis": {
+            "type": "string",
+            "const": "CURATED_ESTIMATE"
+          },
+          "instructions": {
+            "type": "string",
+            "description": "정차 상태에서 사용할 자체 작성 안내",
+            "maxLength": 2000
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "PARKED_ONLY",
+                "STOP_ON_UX_RESTRICTION",
+                "USER_CAN_STOP_ANYTIME"
+              ]
+            },
+            "uniqueItems": true,
+            "minItems": 1,
+            "maxItems": 3
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "category",
+          "plannedDurationSec",
+          "durationBasis",
+          "instructions",
+          "constraints"
+        ]
+      },
+      "ActivitiesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/ResultMeta"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "FOUND",
+              "EMPTY"
+            ]
+          },
+          "activities": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Activity"
+            }
+          }
+        },
+        "required": [
+          "meta",
+          "state",
+          "activities"
+        ]
+      },
+      "MediaCandidatesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "topicIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{1,40}$"
+            },
+            "description": "서버가 보유한 자체 curated 주제 ID. 자유 검색문·시청 히스토리·계정 식별자는 받지 않는다."
+          },
+          "timeBudgetSec": {
+            "type": "integer",
+            "description": "사용자가 정한 시청 예산. 영상 길이를 예산 내 실제 소비 시간으로 보장하지 않는다.",
+            "minimum": 1,
+            "maximum": 14400
+          },
+          "limit": {
+            "type": "integer",
+            "description": "최대 후보 수",
+            "minimum": 1,
+            "maximum": 5
+          }
+        },
+        "required": [
+          "topicIds",
+          "timeBudgetSec",
+          "limit"
+        ]
+      },
+      "MediaCandidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "서버 자체 후보 ID",
+            "maxLength": 80
+          },
+          "provider": {
+            "type": "string",
+            "const": "YOUTUBE"
+          },
+          "videoId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{11}$"
+          },
+          "title": {
+            "type": "string",
+            "description": "공급자에서 확인한 제목",
+            "maxLength": 300
+          },
+          "durationSec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "YouTube 메타데이터 duration을 초로 변환한 값. 광고·버퍼링·재생속도·중단/생방송 지연을 포함하지 않으며 확정 시청시간이 아니다."
+          },
+          "durationStatus": {
+            "type": "string",
+            "enum": [
+              "METADATA_VERIFIED",
+              "UNKNOWN"
+            ]
+          },
+          "embeddable": {
+            "type": "string",
+            "enum": [
+              "ALLOWED",
+              "NOT_ALLOWED",
+              "UNKNOWN"
+            ],
+            "description": "공급자 메타데이터 상태. ALLOWED도 Pleos 차내 재생 지원·심사 승인을 뜻하지 않는다."
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "AVAILABLE",
+              "UNAVAILABLE",
+              "UNKNOWN"
+            ]
+          },
+          "broadcastKind": {
+            "type": "string",
+            "enum": [
+              "ON_DEMAND",
+              "LIVE",
+              "UPCOMING",
+              "UNKNOWN"
+            ]
+          },
+          "checkedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "vehiclePlaybackSupport": {
+            "type": "string",
+            "enum": [
+              "UNVERIFIED",
+              "UNSUPPORTED",
+              "VERIFIED"
+            ],
+            "description": "VERIFIED는 대상 차량/배포정책/실제 재생 검증 근거가 있을 때만 가능. 초안의 기본 상태는 UNVERIFIED."
+          },
+          "playbackEvidence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500,
+            "description": "검증한 대상/버전/시점의 식별자. 없으면 null."
+          },
+          "fallback": {
+            "type": "string",
+            "enum": [
+              "METADATA_ONLY",
+              "OPEN_ON_PHONE",
+              "OMIT"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "videoId",
+          "title",
+          "durationSec",
+          "durationStatus",
+          "embeddable",
+          "availability",
+          "broadcastKind",
+          "checkedAt",
+          "link",
+          "vehiclePlaybackSupport",
+          "playbackEvidence",
+          "fallback"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "durationStatus": {
+                  "const": "METADATA_VERIFIED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "durationSec": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "durationStatus": {
+                  "const": "UNKNOWN"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "durationSec": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "vehiclePlaybackSupport": {
+                  "const": "VERIFIED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "playbackEvidence": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "MediaCandidatesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/ResultMeta"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "FOUND",
+              "EMPTY",
+              "PARTIAL"
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "$ref": "#/components/schemas/MediaCandidate"
+            }
+          },
+          "historyAccessed": {
+            "type": "boolean",
+            "const": false
+          },
+          "selectionPolicy": {
+            "type": "string",
+            "const": "SERVER_CURATED_METADATA_CHECKED"
+          }
+        },
+        "required": [
+          "meta",
+          "state",
+          "candidates",
+          "historyAccessed",
+          "selectionPolicy"
+        ]
+      },
+      "Provider": {
+        "type": "string",
+        "enum": [
+          "KAKAO",
+          "TMAP",
+          "GOOGLE"
+        ],
+        "description": "장소/경로 출처. enum 존재는 해당 제공자 사용 승인 또는 현재 구현을 뜻하지 않는다."
+      },
+      "PlaceRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          },
+          "id": {
+            "type": "string",
+            "description": "공급자 장소 ID. 다른 공급자의 ID와 교환할 수 없다.",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "resolutionToken": {
+            "type": "string",
+            "description": "서버가 현재 앱 세션에 묶어 발급하는 짧은 수명의 opaque 참조. API 키가 아니며 로그에 저장하지 않는다. 데이터 보관/전달 범위는 제공자 조건 확인 후 구현한다.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          }
+        },
+        "required": [
+          "provider",
+          "id",
+          "resolutionToken",
+          "expiresAt"
+        ]
+      },
+      "PlaceSearchRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "center": {
+            "$ref": "#/components/schemas/LocationFix"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "CAFE",
+              "CONVENIENCE_STORE",
+              "SNACK",
+              "PARK"
+            ]
+          },
+          "radiusMeters": {
+            "type": "integer",
+            "description": "앱 자체 제한 2km. 공급자 최대반경과 별개이며 보행 가능 거리로 해석하지 않는다.",
+            "minimum": 50,
+            "maximum": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "description": "앱 자체 후보 개수 제한",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": [
+          "center",
+          "category",
+          "radiusMeters",
+          "limit"
+        ]
+      },
+      "Place": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "placeRef": {
+            "$ref": "#/components/schemas/PlaceRef"
+          },
+          "name": {
+            "type": "string",
+            "description": "공급자 장소명",
+            "maxLength": 300
+          },
+          "category": {
+            "type": "string",
+            "description": "공급자의 실제 분류 문자열",
+            "maxLength": 300
+          },
+          "coordinate": {
+            "$ref": "#/components/schemas/Coordinate"
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "providerDistanceMeters": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "검색 기준점과의 공급자 거리. 도보 경로 거리나 이동시간이 아니다."
+          },
+          "providerUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "openingStatus": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "CLOSED",
+              "UNKNOWN"
+            ],
+            "description": "Kakao Local 기본 응답은 UNKNOWN. 영업시간 미제공을 CLOSED나 OPEN으로 추정하지 않는다."
+          },
+          "openingEvidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "NOT_PROVIDED",
+                  "PROVIDER_DETAILS",
+                  "MANUALLY_VERIFIED"
+                ]
+              },
+              "checkedAt": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UtcTimestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 300
+              }
+            },
+            "required": [
+              "source",
+              "checkedAt",
+              "note"
+            ]
+          }
+        },
+        "required": [
+          "placeRef",
+          "name",
+          "category",
+          "coordinate",
+          "address",
+          "providerDistanceMeters",
+          "providerUrl",
+          "observedAt",
+          "openingStatus",
+          "openingEvidence"
+        ]
+      },
+      "PlaceSearchResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/ResultMeta"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "FOUND",
+              "EMPTY",
+              "PARTIAL"
+            ]
+          },
+          "places": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/Place"
+            }
+          },
+          "attribution": {
+            "type": "string",
+            "description": "제공자 출처·필수 저작권 문구. 실제 조건 확인 후 표시.",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "meta",
+          "state",
+          "places",
+          "attribution"
+        ]
+      },
+      "OutingPreviewRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "stationLocation": {
+            "$ref": "#/components/schemas/LocationFix"
+          },
+          "placeRef": {
+            "$ref": "#/components/schemas/PlaceRef"
+          },
+          "timeBudgetSec": {
+            "type": "integer",
+            "description": "요청 시점의 사용자 확인 시간 창. 검증하지 않은 충전 완료 ETA를 자동 대입하지 않는다.",
+            "minimum": 1,
+            "maximum": 14400
+          },
+          "staySec": {
+            "type": "integer",
+            "description": "목적지 체류 계획. 메뉴 주문/줄서기 대기까지 보장하는 값이 아니다.",
+            "minimum": 0,
+            "maximum": 7200
+          },
+          "bufferSec": {
+            "type": "integer",
+            "description": "양수인 외출 복귀 버퍼. 차 안 기본 2분과 별도 제품 설정; 실보행 검증 후 정책 확정.",
+            "minimum": 1,
+            "maximum": 3600
+          }
+        },
+        "required": [
+          "stationLocation",
+          "placeRef",
+          "timeBudgetSec",
+          "staySec",
+          "bufferSec"
+        ]
+      },
+      "RouteEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "OUTBOUND",
+              "INBOUND"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "FOUND",
+              "NO_ROUTE",
+              "TIMEOUT",
+              "RATE_LIMITED",
+              "UNAVAILABLE",
+              "UNSUPPORTED",
+              "NOT_REQUESTED"
+            ]
+          },
+          "queriedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/Coordinate"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Coordinate"
+          },
+          "durationSec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "초 단위. 미확인은 null이며 0으로 대체하지 않는다."
+          },
+          "distanceMeters": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "mode": {
+            "type": "string",
+            "const": "WALK"
+          },
+          "landingUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "geometry": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "maxItems": 10000,
+            "items": {
+              "$ref": "#/components/schemas/Coordinate"
+            },
+            "description": "반환 경로의 검증된 좌표만 허용. LLM 생성/직선 보간으로 보행 경로를 꾸미지 않는다. 공급자 표시/전달 조건 승인 전에는 null."
+          }
+        },
+        "required": [
+          "provider",
+          "direction",
+          "status",
+          "queriedAt",
+          "origin",
+          "destination",
+          "durationSec",
+          "distanceMeters",
+          "mode",
+          "landingUrl",
+          "geometry"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "FOUND"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "durationSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "distanceMeters": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "FOUND"
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "durationSec": {
+                  "type": "null"
+                },
+                "distanceMeters": {
+                  "type": "null"
+                },
+                "geometry": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "OutingPreviewResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/ResultMeta"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "NOT_FEASIBLE",
+              "UNKNOWN"
+            ]
+          },
+          "feasible": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "경로·시간 예산 적합성만 뜻한다. READY=true, NOT_FEASIBLE=false, UNKNOWN=null. 최종 차량/충전/폰 조건과 안전한 복귀를 보장하지 않는다."
+          },
+          "timeBudgetSec": {
+            "type": "integer",
+            "description": "요청 시간 예산",
+            "minimum": 1,
+            "maximum": 14400
+          },
+          "outboundSec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "초 단위. 미확인은 null이며 0으로 대체하지 않는다."
+          },
+          "inboundSec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "초 단위. 미확인은 null이며 0으로 대체하지 않는다."
+          },
+          "staySec": {
+            "type": "integer",
+            "description": "계획 체류시간",
+            "minimum": 0,
+            "maximum": 7200
+          },
+          "bufferSec": {
+            "type": "integer",
+            "description": "복귀 버퍼",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "totalSec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "초 단위. 미확인은 null이며 0으로 대체하지 않는다."
+          },
+          "routeEvidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outbound": {
+                "$ref": "#/components/schemas/RouteEvidence"
+              },
+              "inbound": {
+                "$ref": "#/components/schemas/RouteEvidence"
+              }
+            },
+            "required": [
+              "outbound",
+              "inbound"
+            ]
+          },
+          "reasonCodes": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 10,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "INSUFFICIENT_TIME",
+                "STALE_LOCATION",
+                "LOCATION_ACCURACY_UNKNOWN",
+                "LOCATION_TOO_IMPRECISE",
+                "ROUTE_MISSING",
+                "ROUTE_PARTIAL",
+                "UPSTREAM_TIMEOUT",
+                "UPSTREAM_UNAVAILABLE",
+                "PROVIDER_UNSUPPORTED",
+                "RATE_LIMITED",
+                "INVALID_ROUTE_DATA",
+                "REF_EXPIRED"
+              ]
+            }
+          },
+          "assessedAt": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "validUntil": {
+            "$ref": "#/components/schemas/UtcTimestamp"
+          },
+          "approvalScope": {
+            "type": "string",
+            "const": "ROUTE_AND_TIME_ONLY"
+          }
+        },
+        "required": [
+          "meta",
+          "status",
+          "feasible",
+          "timeBudgetSec",
+          "outboundSec",
+          "inboundSec",
+          "staySec",
+          "bufferSec",
+          "totalSec",
+          "routeEvidence",
+          "reasonCodes",
+          "assessedAt",
+          "validUntil",
+          "approvalScope"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "READY"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "feasible": {
+                  "const": true
+                },
+                "outboundSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "inboundSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "reasonCodes": {
+                  "maxItems": 0
+                },
+                "routeEvidence": {
+                  "properties": {
+                    "outbound": {
+                      "properties": {
+                        "status": {
+                          "const": "FOUND"
+                        }
+                      }
+                    },
+                    "inbound": {
+                      "properties": {
+                        "status": {
+                          "const": "FOUND"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "NOT_FEASIBLE"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "feasible": {
+                  "const": false
+                },
+                "outboundSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "inboundSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalSec": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "reasonCodes": {
+                  "minItems": 1,
+                  "contains": {
+                    "const": "INSUFFICIENT_TIME"
+                  }
+                },
+                "routeEvidence": {
+                  "properties": {
+                    "outbound": {
+                      "properties": {
+                        "status": {
+                          "const": "FOUND"
+                        }
+                      }
+                    },
+                    "inbound": {
+                      "properties": {
+                        "status": {
+                          "const": "FOUND"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "UNKNOWN"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "feasible": {
+                  "type": "null"
+                },
+                "totalSec": {
+                  "type": "null"
+                },
+                "reasonCodes": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "INVALID_REQUEST",
+                  "SESSION_REQUIRED",
+                  "SESSION_EXPIRED",
+                  "FEATURE_DISABLED",
+                  "INVALID_PLACE_REF",
+                  "PLACE_REF_EXPIRED",
+                  "RATE_LIMITED",
+                  "UPSTREAM_RATE_LIMITED",
+                  "UPSTREAM_TIMEOUT",
+                  "UPSTREAM_UNAVAILABLE",
+                  "PROVIDER_NOT_CONFIGURED",
+                  "PROVIDER_UNSUPPORTED",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "description": "개인정보/제공자 키/원시 응답을 노출하지 않는 안내",
+                "maxLength": 300
+              },
+              "requestId": {
+                "type": "string",
+                "description": "임의 요청 ID",
+                "maxLength": 128
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "retryAfterSec": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 86400
+              },
+              "fieldErrors": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "field": {
+                      "type": "string",
+                      "description": "오류 필드 경로",
+                      "maxLength": 120
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "입력값 자체를 포함하지 않는 검증 사유",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "field",
+                    "reason"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId",
+              "retryable",
+              "retryAfterSec",
+              "fieldErrors"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      }
+    }
+  },
+  "x-implementation-status": "PROPOSED_NOT_IMPLEMENTED",
+  "x-provider-activation": "사용자 명시 승인 전 가입·활성화·결제·실제 제공자 API 호출 금지",
+  "x-privacy": {
+    "retention": "정확한 차량/폰 위치와 요청 본문·경로 원본은 요청 목적 외 영구 저장하지 않는다. 단기 참조 메모리도 최소 수명/세션 범위로 제한하고 공급자 정책 승인 후 도입.",
+    "logs": "requestId/상태코드/지연/할당량 같은 최소 운영 값만 사용. Bearer/제공자 키/정확 좌표/PlaceRef 토큰은 로그에 기록하지 않는다.",
+    "deviceBoundary": "차량 위치와 폰 위치를 별도로 관리하며 QR가 위치 허용·푸시 구독·지속 충전 감시를 자동으로 제공하지 않는다."
+  },
+  "x-runtime-invariants": [
+    "READY이면 두 방향 status=FOUND, 시각·좌표·단위 검증 통과, totalSec가 정확한 합이며 totalSec<=timeBudgetSec여야 한다.",
+    "NOT_FEASIBLE은 두 방향 경로를 확인했고 totalSec>timeBudgetSec인 경우다. 경로 미확인은 UNKNOWN으로 구분한다.",
+    "UNKNOWN/timeout/지원 미확인/부분 실패는 feasible=true가 될 수 없다.",
+    "expiry와 stale 판정은 서버 시각으로 수행하고 공급자/위치 관측시각을 다시 쓰지 않는다.",
+    "ResultMeta COMPLETE+state EMPTY는 정상 빈 목록이며 404와 다르다. 상류 미설정·미지원·전체 장애는 503 ErrorResponse.",
+    "영업상태 UNKNOWN을 항상 허용한다. 장소 검색만으로 시간 적합성이나 영업 중을 확정하지 않는다.",
+    "후보 선택·외출 미리보기만 명세화한다. 실제 안내 시작/주문/결제/알림 전송/자동 차량 제어 API는 없다."
+  ],
+  "externalDocs": {
+    "description": "현재 기본 후보인 Kakao 도보 공식 명세. 제공자 문서 기능은 실제 앱 사용 승인/지원 검증과 별개.",
+    "url": "https://developers.kakao.com/docs/ko/kakaomap/rest-api#walking"
+  }
+}

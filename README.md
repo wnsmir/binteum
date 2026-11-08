@@ -41,6 +41,15 @@ JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 
 - `.github/workflows/android.yml`: 단위 테스트, APK 빌드, lint
 - `docs/product-plan.md`: 공동작업용 제품 기획과 MVP 완료 기준
 
+## 콘텐츠와 개인화 확장 계획
+
+2026년 11월 8일 작성한 다음 문서는 앞으로 구현할 설계이며 현재 앱에 연결된 기능이 아닙니다. 차량 내 기본 세션을 먼저 완성하고, 미디어·장소·외출은 실제 공급자와 기기 검증 결과에 따라 확장합니다.
+
+- [경험 확장 실행 계획](docs/experience-plan.md): 시간별 활동, YouTube·웹·주변 산책과 간식, 제출까지 일정
+- [UI 명세](docs/ui-spec.md): 추천·진행·종료·휴대폰 인계 화면과 오류 상태
+- [API 설계](docs/api-spec.md) 및 [OpenAPI 3.1 계약](docs/api/openapi.json): 앱 내부 경계와 BFF 4개 경로
+- [추천과 개인화 설계](docs/recommendation-design.md): 시간·안전 필터, 직접 선호와 자체 평가, 이후 밴딧 실험
+
 ## 함께 개발하기
 
 저장소를 clone한 뒤 Android Studio에서 루트 폴더를 열고 위 빌드 명령으로 환경을 확인합니다. 기능 작업은 별도 브랜치에서 진행하고, 테스트와 빌드를 확인한 후 `main`을 대상으로 Pull Request를 엽니다.
