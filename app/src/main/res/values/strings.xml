@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">빈틈의실</string>
+    <string name="target_summary">목표 잔량 %1$d%% · 내가 정한 대기 시간 20분</string>
+</resources>
