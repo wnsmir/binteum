@@ -2,7 +2,7 @@
 
 전기차 충전 및 정차 대기 중 목표 배터리 잔량과 사용자가 정한 시간에 맞춰 짧은 활동을 선택하고 마무리하도록 돕는 Pleos Connect 앱의 개발 시작 프로젝트입니다.
 
-현재 앱은 **첫 기능 구현 버전**입니다. Pleos Vehicle 2.3.2의 잔량 읽기, AAOS 실제 충전 상태·CarUxRestrictions, 시간별 자체 활동 추천, 카운트다운, 로컬 취향 저장, WebView 미디어 화면을 연결했습니다. 실제 차량 값 수신과 YouTube 재생은 아직 기기 검증 전입니다. 차량의 충전 한도를 바꾸거나 충전을 종료하지 않습니다. [구현·검증 상태](docs/implementation-status.md)
+현재 앱은 **첫 기능 구현 버전**입니다. Pleos Vehicle 2.3.2의 잔량 읽기, AAOS 실제 충전 상태·CarUxRestrictions, 시간별 자체 활동 추천, 카운트다운, 로컬 취향 저장, WebView 미디어 화면을 연결했습니다. Pleos 에뮬레이터의 실제 데이터 경로로 SOC·완충 상태·UX 제한 없음을 수신했고, 사용자가 시연 모드의 활동 카드와 YouTube 영상·소리 재생을 확인했습니다. 실차 검증과 주행 전환 중 재생 중지 검수는 남아 있습니다. 차량의 충전 한도를 바꾸거나 충전을 종료하지 않습니다. [구현·검증 상태](docs/implementation-status.md)
 
 ## 개발 환경
 
@@ -95,7 +95,9 @@ adb -s VERIFIED_SERIAL shell am start -n com.binteum.app/.MainActivity
 adb -s VERIFIED_SERIAL forward tcp:8088 tcp:8088
 ```
 
-Virtual Console은 `http://127.0.0.1:8088/`에서 엽니다. 이 Mac에서는 포워딩 후 HTTP 200과 Pleos Connect Virtual Console 응답을 확인했습니다. 앱의 기본 입력은 실제 SDK 어댑터이며, `나의 설정 → 차량 데이터 권한 허용`에서 Android 차량 에너지 읽기 권한을 요청합니다. 미지원·권한 거부·안전 상태 미확인일 때 활동을 차단합니다. Console에서 차량 상태를 바꿔 앱에 반영하는 통합 검증은 아직 수행하지 않았습니다. debug 빌드의 시연 모드는 명시적으로 켜야 하며 화면에 모의 데이터임을 표시합니다.
+Virtual Console은 `http://127.0.0.1:8088/`에서 엽니다. 앱의 기본 입력은 실제 SDK 어댑터이며, 권한이 없으면 활동·미디어 화면에 `충전 상태 읽기 허용` 버튼을 표시합니다. 거부 후에는 앱 설정에서 다시 허용할 수 있고, 연결 실패 시 재확인 버튼을 제공합니다. 기술 진단은 debug 설정 화면에 표시합니다.
+
+이 에뮬레이터의 운전자 프로필은 user 10입니다. 현재 사용자의 에너지 읽기 권한을 허용한 뒤 SOC 100%, `STATE_FULLY_CHARGED`, UX 제한 없음 수신을 확인했습니다. Console에서 SOC를 65%로, Charge Switch를 On으로 바꾸면 두 값은 앱에 반영되지만 `EV_CHARGE_STATE`는 계속 `STATE_FULLY_CHARGED`였습니다. 충전 스위치만으로 충전 중이라고 판단하지 않습니다. 화면·영상 시연은 debug의 `개발용 모의 충전으로 둘러보기`로 진행하며 모의 상태임을 표시합니다.
 
 이 Mac에서는 에뮬레이터가 호스트의 IPv6 링크 로컬 DNS를 자동으로 사용하지 못했습니다. 기기를 종료한 뒤 `./scripts/start-pleos.sh -dns-server 8.8.8.8`로 시작해 YouTube 도메인 해석을 확인했습니다. 해당 실행에만 적용한 옵션이며, 네트워크 연결 확인이 영상 재생 검증을 뜻하지는 않습니다. [Android 에뮬레이터 DNS](https://developer.android.com/studio/run/emulator-networking-dns)
 

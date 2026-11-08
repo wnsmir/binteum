@@ -66,6 +66,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
     private var uxRestricted: Boolean? = null
     private var observedAtMillis = 0L
     private var batteryStatus = "차량 데이터 미확인"
+    private var switchStatus = "충전 요청 스위치 미확인"
     private var uxStatus = "AAOS UX 상태 미확인"
     private var chargeStatus = "실제 충전 상태 미확인"
 
@@ -198,7 +199,8 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         var switch: Boolean? = null
         var charge: Boolean? = null
         var chargeChangedAt = 0L
-        var failed = false
+        var socFailed = false
+        var switchFailed = false
         var finished = false
         val timeout = Runnable {
             if (active && generation == session && cycle == request && !finished) {
@@ -210,7 +212,9 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 chargeSwitchEnabled = null
                 chargeStateChangedAtMillis = null
                 observedAtMillis = 0L
-                batteryStatus = "Pleos 응답 시간 초과 · 화면을 다시 열어 재연결"
+                batteryStatus = "차량 읽기 시간 초과 · 화면을 다시 열어 재연결"
+                switchStatus = "충전 요청 스위치 미확인"
+                chargeStatus = "실제 충전 상태 미확인 · 응답 시간 초과"
                 publish()
             }
         }
@@ -218,7 +222,8 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             if (!active || generation != session || cycle != request || finished) return@onMain
             if (kind == 0) soc = socValue?.takeIf { it in 0..100 }
             if (kind == 1) switch = chargeValue
-            failed = failed || error
+            if (kind == 0) socFailed = error
+            if (kind == 1) switchFailed = error
             pending -= 1
             if (pending == 0) {
                 finished = true
@@ -231,9 +236,14 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 chargeStateChangedAtMillis = chargeChangedAt.takeIf { awake && it > 0L }
                 observedAtMillis = if (awake) startedAt else 0L
                 batteryStatus = when {
-                    failed -> "Pleos 읽기 실패 · 확인되지 않은 값 사용 안 함"
-                    soc == null || charge == null -> "Pleos 일부 값 미지원/미확인"
+                    socFailed -> "Pleos SOC 읽기 실패"
+                    soc == null -> "Pleos SOC 미지원/미확인"
                     else -> "Pleos SOC 수신 · 원본 측정시각 미제공"
+                }
+                switchStatus = when {
+                    switchFailed -> "충전 요청 스위치 읽기 실패"
+                    switch == null -> "충전 요청 스위치 미지원/미확인"
+                    else -> "충전 요청 스위치: $switch · 실제 충전 상태와 별도"
                 }
                 publish()
                 handler.postDelayed({ poll(session) }, POLL_INTERVAL_MS)
@@ -280,7 +290,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
 
     private fun publish() {
         if (!active) return
-        diagnostics = "$batteryStatus / $chargeStatus / 충전 요청 스위치: ${chargeSwitchEnabled ?: "미확인"} / $uxStatus"
+        diagnostics = "$batteryStatus / $switchStatus / $chargeStatus / $uxStatus"
         listener?.invoke(VehicleSnapshot(stateOfCharge, charging, uxRestricted,
             powerManager?.isInteractive == true, observedAtMillis))
     }
@@ -307,6 +317,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         charging = null
         chargeSwitchEnabled = null
         chargeStateChangedAtMillis = null
+        switchStatus = "충전 요청 스위치 미확인"
         chargeStatus = "실제 충전 상태 미확인"
         uxRestricted = null
         observedAtMillis = 0L

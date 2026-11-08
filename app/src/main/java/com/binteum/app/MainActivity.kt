@@ -2,6 +2,8 @@ package com.binteum.app
 
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -9,6 +11,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -61,6 +65,8 @@ class MainActivity : Activity() {
     private val timeButtons = mutableListOf<Button>()
     private var resetWindowButton: Button? = null
     private var lastWindowHasBudget = true
+    private var lastReadinessKey = ""
+    private var lastDebugObservation = ""
     private data class Run(val activityId: String, val attemptId: String, val startedElapsed: Long,
                            val startedWall: Long, val bucket: String)
     private val ticker = object : Runnable {
@@ -166,15 +172,27 @@ class MainActivity : Activity() {
             message = "설정한 ${target}%에 도달했어요. 차량 이동을 준비해 주세요."
             persistTarget()
         }
-        if (previous != status) render() else updateLabels()
+        val readinessKey = "$status/${hasEnergyPermission()}/${value.stateOfCharge != null}/${value.charging != null}/${value.uxRestricted}"
+        if (BuildConfig.DEBUG && !demoMode) {
+            val diagnostic = "status=$status soc=${value.stateOfCharge} charging=${value.charging} uxRestricted=${value.uxRestricted} / " +
+                (source as? PleosVehicleDataSource)?.diagnostics.orEmpty()
+            if (diagnostic != lastDebugObservation) {
+                Log.i("BinteumVehicle", diagnostic)
+                lastDebugObservation = diagnostic
+            }
+        }
+        if (previous != status || lastReadinessKey != readinessKey) {
+            lastReadinessKey = readinessKey
+            render()
+        } else updateLabels()
     }
 
     private fun statusText() = when (status) {
         SessionStatus.CHARGING -> "충전 중 · 차 안 활동 가능"
         SessionStatus.TARGET_REACHED -> "목표 잔량에 도달했어요"
-        SessionStatus.INTERRUPTED -> "충전이 중단됐어요 · 연결 확인"
+        SessionStatus.INTERRUPTED -> "충전 중이 아니에요 · 연결 확인"
         SessionStatus.DRIVING_LOCKED -> "주행 제한 · 활동을 멈췄어요"
-        SessionStatus.SUSPENDED -> "차량 휴면 · 감시 중단"
+        SessionStatus.SUSPENDED -> "화면 비활성 · 상태 확인 중단"
         SessionStatus.WAITING_FOR_DATA -> "차량·안전 상태 확인 필요"
     }
 
@@ -299,18 +317,14 @@ class MainActivity : Activity() {
             1 -> {
                 addView(label("가볍게 보고, 제때 쉬어요", 38f, true))
                 addView(label("공식 예제 영상과 자체 웹 활동 · 재생 이력으로 취향을 학습하지 않아요", 24f))
-                if (allowed()) addView(media) else addView(label(statusText(), 30f, true))
+                if (allowed()) addView(media) else buildBlockedState(this)
             }
             2 -> buildSettings(this)
             else -> {
                 addView(label(if (active != null) "지금은 나를 위한 시간" else "이 틈에, 무엇을 할까요?", 38f, true))
                 addView(label(message, 24f).apply { setTextColor(muted) })
                 when {
-                    !allowed() -> {
-                        addView(label(statusText(), 32f, true))
-                        addView(label("차량의 최신 충전·안전 상태가 확인되면 활동을 열어요.\n목표 알림은 충전을 제어하지 않아요.", 25f))
-                        if (!demoMode) diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).also { addView(it) }
-                    }
+                    !allowed() -> buildBlockedState(this)
                     recovery != null -> {
                         addView(label("이전 활동이 남아 있어요", 30f, true))
                         addView(label("남은 시간을 확인한 뒤 직접 이어가 주세요. 자동으로 다시 시작하지 않아요.", 24f))
@@ -323,6 +337,65 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun hasEnergyPermission() = checkSelfPermission("android.car.permission.CAR_ENERGY") == PackageManager.PERMISSION_GRANTED
+
+    private fun requestEnergyPermission() {
+        if (hasEnergyPermission()) { reconnectVehicle(); return }
+        val askedBefore = prefs.getBoolean("askedEnergyPermission", false)
+        if (askedBefore && !shouldShowRequestPermissionRationale("android.car.permission.CAR_ENERGY")) {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }.onFailure { message = "앱 설정을 열 수 없어요. 차량 설정에서 빈틈의실의 권한을 확인해 주세요."; render() }
+        } else {
+            prefs.edit().putBoolean("askedEnergyPermission", true).apply()
+            requestPermissions(arrayOf("android.car.permission.CAR_ENERGY"), 700)
+        }
+    }
+
+    private fun reconnectVehicle() {
+        if (demoMode) return
+        media.pauseForHost()
+        interruptActivity("차량 연결을 다시 확인하고 있어요.")
+        recovery = null
+        source.stop()
+        snapshot = null; status = SessionStatus.WAITING_FOR_DATA
+        sourceStartedAt = System.currentTimeMillis()
+        render()
+        if (started) source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
+    }
+
+    private fun buildBlockedState(parent: LinearLayout) {
+        val missingPermission = !demoMode && !hasEnergyPermission() && status == SessionStatus.WAITING_FOR_DATA
+        val heading = when {
+            missingPermission -> "충전 상태를 읽을 수 있도록 허용해 주세요"
+            status == SessionStatus.TARGET_REACHED -> "설정한 목표 잔량에 도달했어요"
+            status == SessionStatus.INTERRUPTED -> "충전이 진행되고 있지 않아요"
+            else -> statusText()
+        }
+        val description = when {
+            missingPermission -> "배터리 잔량과 실제 충전 상태는 별도로 확인해요.\n아래 버튼에서 충전 상태 읽기를 허용하면 연결을 다시 확인합니다."
+            status == SessionStatus.TARGET_REACHED -> "이번 세션의 ${target}% 목표에 도달했어요. 다음 충전을 시작할 때 새 세션을 열어 주세요."
+            status == SessionStatus.INTERRUPTED -> "충전기 연결과 충전 시작 여부를 확인해 주세요. 충전 상태가 확인되면 활동을 열어요."
+            status == SessionStatus.DRIVING_LOCKED -> "안전하게 정차하고 차량의 화면 사용 제한이 해제되면 다시 이용할 수 있어요."
+            status == SessionStatus.SUSPENDED -> "화면이 다시 활성화되면 최신 차량 상태를 확인할게요."
+            else -> "차량 데이터가 아직 준비되지 않았어요. 잠시 기다리거나 연결을 다시 확인해 주세요."
+        }
+        parent.addView(label(heading, 32f, true))
+        parent.addView(label(description, 25f))
+        if (missingPermission) parent.addView(button("충전 상태 읽기 허용", true) { requestEnergyPermission() })
+        if (!demoMode && status in listOf(SessionStatus.WAITING_FOR_DATA, SessionStatus.INTERRUPTED)) {
+            if (!missingPermission) parent.addView(button("차량 연결 다시 확인") { reconnectVehicle() })
+            val value = snapshot
+            parent.addView(label("배터리 잔량 ${if (value?.stateOfCharge != null) "확인됨" else "확인 중"} · " +
+                "충전 상태 ${if (value?.charging != null) "확인됨" else "확인 중"} · " +
+                "화면 제한 ${if (value?.uxRestricted != null) "확인됨" else "확인 중"}", 23f))
+        }
+        if (BuildConfig.DEBUG && !demoMode && status != SessionStatus.DRIVING_LOCKED && status != SessionStatus.SUSPENDED) {
+            parent.addView(button("개발용 모의 충전으로 둘러보기") { switchSource() })
+        }
+        parent.addView(label("목표 알림은 차량의 충전을 제어하지 않아요.", 23f))
     }
 
     private fun buildRecommendations(parent: LinearLayout) {
@@ -398,10 +471,8 @@ class MainActivity : Activity() {
 
     private fun buildSettings(parent: LinearLayout) {
         parent.addView(label("나에게 맞는 틈", 38f, true))
-        if (!demoMode && checkSelfPermission("android.car.permission.CAR_ENERGY") != PackageManager.PERMISSION_GRANTED) {
-            parent.addView(button("충전 상태 읽기 허용") {
-                requestPermissions(arrayOf("android.car.permission.CAR_ENERGY"), 700)
-            })
+        if (!demoMode && !hasEnergyPermission()) {
+            parent.addView(button("충전 상태 읽기 허용") { requestEnergyPermission() })
         }
         parent.addView(label("${windowMinutes}분 구간의 직접 선호 · 이 기기에만 저장", 24f))
         val profile = loadProfile(bucket())
@@ -423,6 +494,10 @@ class MainActivity : Activity() {
         if (!allowed()) parent.addView(label("선호 변경은 차량·안전 상태가 확인된 뒤 가능해요.", 24f))
         if (BuildConfig.DEBUG) {
             parent.addView(label("개발용 시연 설정", 26f, true))
+            if (!demoMode) {
+                parent.addView(button("차량 연결 다시 확인") { reconnectVehicle() })
+                diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).also { parent.addView(it) }
+            }
             parent.addView(button(if (demoMode) "실제 Pleos 연결로 전환" else "모의 데이터 시연 켜기", demoMode) { switchSource() })
             if (demoMode) {
                 listOf("충전 중 65%", "목표 도달", "목표 전 충전 중단", "주행 제한", "데이터 지연").forEachIndexed { index, text ->
