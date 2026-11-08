@@ -74,9 +74,12 @@ class MainActivity : Activity() {
     private var timerLabel: TextView? = null
     private var diagnosticsLabel: TextView? = null
     private var chargeGauge: ChargeGaugeView? = null
+    private var leftScroll: ScrollView? = null
+    private var contentScroll: ScrollView? = null
     private val timeButtons = mutableListOf<Button>()
     private var resetWindowButton: Button? = null
     private var lastWindowHasBudget = true
+    private var lastWindowContentKey = ""
     private var lastReadinessKey = ""
     private var lastDebugObservation = ""
     private data class Run(val activityId: String, val attemptId: String, val startedElapsed: Long,
@@ -95,6 +98,8 @@ class MainActivity : Activity() {
                 if (active == null) render()
             }
             lastWindowHasBudget = hasBudget
+            if (tab != 2 && allowed() && active == null && recovery == null && completed == null &&
+                windowContentKey() != lastWindowContentKey) render()
             handler.postDelayed(this, 1_000)
         }
     }
@@ -164,7 +169,7 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         palette = AppTheme.palette(this, themeMode)
-        render()
+        render(preserveScroll = true)
     }
 
     private fun makeSource(): VehicleDataSource = if (demoMode) DemoVehicleDataSource() else PleosVehicleDataSource(this)
@@ -239,6 +244,13 @@ class MainActivity : Activity() {
     }
     private fun remainingWindowSeconds(): Int = if (windowEndElapsed == 0L) windowMinutes * 60 else
         ((windowEndElapsed - SystemClock.elapsedRealtime()).coerceAtLeast(0) / 1000).toInt()
+    private fun windowContentKey(): String {
+        val remaining = remainingWindowSeconds()
+        val phase = when { remaining == 0 -> "ended"; remaining <= ActivityRecommender.DEFAULT_RESERVE_SECONDS -> "finishing"; else -> "available" }
+        val eligible = ActivityCatalog.all.filter { it.durationSeconds + ActivityRecommender.DEFAULT_RESERVE_SECONDS <= remaining }
+            .joinToString(",") { it.id }
+        return if (tab == 1) phase else "$phase/$eligible"
+    }
     private fun remainingActivitySeconds(run: Run): Int {
         val duration = ActivityCatalog.find(run.activityId)?.durationSeconds ?: 0
         val elapsed = (SystemClock.elapsedRealtime() - run.startedElapsed).coerceAtLeast(0)
@@ -247,8 +259,11 @@ class MainActivity : Activity() {
     private fun clock(seconds: Int) = "%02d:%02d".format(seconds / 60, seconds % 60)
     private fun bucket() = when (windowMinutes) { 8 -> "short"; 20 -> "medium"; 40 -> "long"; else -> "extended" }
 
-    private fun render() {
+    private fun render(preserveScroll: Boolean = false) {
         if (!::media.isInitialized) return
+        val previousLeftScroll = if (preserveScroll) leftScroll?.scrollY ?: 0 else 0
+        val previousContentScroll = if (preserveScroll) contentScroll?.scrollY ?: 0 else 0
+        lastWindowContentKey = windowContentKey()
         val preserveMedia = tab == 1 && allowed()
         if (preserveMedia) media.beginHostReparent()
         try {
@@ -279,15 +294,19 @@ class MainActivity : Activity() {
             if (wide) {
                 val sideWidth = if (resources.configuration.screenWidthDp >= 1500) 350 else 320
                 body.setPadding(dp(16), 0, dp(16), dp(12))
-                body.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(left) },
+                leftScroll = ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(left) }
+                contentScroll = ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(right) }
+                body.addView(leftScroll,
                     LinearLayout.LayoutParams(dp(sideWidth), -1))
-                body.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(right) },
+                body.addView(contentScroll,
                     LinearLayout.LayoutParams(0, -1, 1f))
                 root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
                 body.setPadding(dp(16), 0, dp(16), dp(12))
                 body.addView(left); body.addView(right)
-                root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+                leftScroll = null
+                contentScroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(body) }
+                root.addView(contentScroll, LinearLayout.LayoutParams(-1, 0, 1f))
             }
             val dock = row().apply {
                 gravity = Gravity.CENTER; setPadding(dp(20), dp(12), dp(20), dp(12)); setBackgroundColor(palette.surface)
@@ -314,6 +333,16 @@ class MainActivity : Activity() {
             root.addView(dock)
             setContentView(root)
             updateSystemBars()
+            if (preserveScroll) {
+                val nextLeftScroll = leftScroll
+                val nextContentScroll = contentScroll
+                root.post {
+                    if (root.isAttachedToWindow) {
+                        nextLeftScroll?.scrollTo(0, previousLeftScroll)
+                        nextContentScroll?.scrollTo(0, previousContentScroll)
+                    }
+                }
+            }
             refreshMediaGate(); updateLabels()
         } finally {
             if (preserveMedia) media.endHostReparent()
@@ -321,23 +350,36 @@ class MainActivity : Activity() {
     }
 
     private fun buildLeft(compact: Boolean): LinearLayout = column().apply {
+        val largeText = resources.configuration.fontScale >= 1.3f
         setPadding(dp(24), dp(24), dp(24), dp(24))
         background = rounded(palette.surface, 28)
         addView(sectionTitle("지금의 충전", AppIcon.BATTERY))
-        if (compact) {
-            val summary = row().apply { gravity = Gravity.CENTER_VERTICAL }
-            socLabel = label("—", 56f, true).apply { setSingleLine(true) }.also {
+        if (compact || largeText) {
+            val stacked = largeText || resources.configuration.screenWidthDp < 450
+            val summary = (if (stacked) column() else row()).apply {
+                gravity = Gravity.CENTER_VERTICAL; isBaselineAligned = false
+            }
+            socLabel = label("—", if (largeText) 48f else 56f, true).apply { setSingleLine(true) }.also {
                 summary.addView(it, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(20) })
             }
-            statusLabel = label(statusText(), 24f).also { summary.addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
+            statusLabel = label(statusText(), 24f).also {
+                summary.addView(it, if (stacked) LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f))
+            }
             addView(summary)
         } else {
             val gaugeFrame = FrameLayout(this@MainActivity)
             chargeGauge = ChargeGaugeView(this@MainActivity).also { gaugeFrame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
             val number = column().apply { gravity = Gravity.CENTER }
-            socLabel = label("—", 64f, true).also { number.addView(it) }
-            number.addView(label("현재 배터리", 23f).apply { setTextColor(muted) })
-            gaugeFrame.addView(number, FrameLayout.LayoutParams(-1, -1))
+            socLabel = label("—", 64f, true).apply {
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                setPadding(0, dp(4), 0, dp(4))
+                setAutoSizeTextTypeUniformWithConfiguration(32, 64, 2, android.util.TypedValue.COMPLEX_UNIT_SP)
+            }.also { number.addView(it, LinearLayout.LayoutParams(-1, -2)) }
+            number.addView(label("현재 배터리", 23f).apply {
+                setTextColor(muted); gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(-1, -2))
+            gaugeFrame.addView(number, FrameLayout.LayoutParams(dp(168), -2, Gravity.CENTER))
             addView(gaugeFrame, LinearLayout.LayoutParams(-1, dp(230)))
             statusLabel = label(statusText(), 24f).apply { gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(16)) }.also { addView(it) }
         }
@@ -353,18 +395,20 @@ class MainActivity : Activity() {
         }.apply { withIcon(AppIcon.SETTINGS) })
         if (!compact || chargeControlsExpanded) {
             addView(label("알림 목표", 24f, true))
-            val targets = row()
+            val targets = if (largeText) column() else row()
             listOf(70, 80, 90).forEach { value ->
                 targets.addView(button("$value%", target == value, safeToConfigure()) {
                     if (safeToConfigure() && value != target) {
                         target = value; session = ChargingSession(target); persistTarget()
                         snapshot?.let(::acceptSnapshot); render()
                     }
-                }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), 0, dp(3), 0) })
+                }, (if (largeText) LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f)).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                })
             }
             addView(targets)
             addView(label("사용할 시간", 24f, true).apply { setPadding(0, dp(24), 0, dp(10)) })
-            listOf(listOf(8, 20), listOf(40, 60)).forEach { pair ->
+            (if (largeText) listOf(listOf(8), listOf(20), listOf(40), listOf(60)) else listOf(listOf(8, 20), listOf(40, 60))).forEach { pair ->
                 val times = row()
                 pair.forEach { minutes ->
                     times.addView(button("${minutes}분", windowMinutes == minutes, allowed() && windowEndElapsed == 0L) {
@@ -387,12 +431,22 @@ class MainActivity : Activity() {
             }.apply { withIcon(AppIcon.RESET) })
         }
         resetWindowButton = button("대기시간 다시 설정", false, allowed()) {
-            if (!allowed()) return@button
-            media.pauseForHost(); interruptActivity("새 대기시간을 선택해 주세요.")
-            recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
-            chargeControlsExpanded = true
-            saveCheckpoint(); render()
+            resetWaitingWindow()
         }.apply { withIcon(AppIcon.RESET) }.also { addView(it) }
+    }
+
+    private fun resetWaitingWindow(minutes: Int? = null) {
+        if (!allowed()) return
+        media.pauseForHost()
+        interruptActivity(if (minutes == null) "새 대기시간을 선택해 주세요." else "${minutes}분에 맞는 활동을 골라 보세요.")
+        recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
+        if (minutes != null && minutes in listOf(8, 20, 40, 60)) {
+            windowMinutes = minutes
+            prefs.edit().putInt("windowMinutes", minutes).apply()
+        }
+        chargeControlsExpanded = minutes == null
+        lastWindowHasBudget = true
+        saveCheckpoint(); render()
     }
 
     private fun buildRight(): LinearLayout = column().apply {
@@ -403,13 +457,19 @@ class MainActivity : Activity() {
                 addView(label("보고, 쉬고, 다시 출발.", 40f, true))
                 addView(label("잠깐의 여유에 어울리는 콘텐츠", 24f).apply { setTextColor(muted) })
                 addView(space(16))
-                if (allowed()) addView(media) else buildBlockedState(this)
+                when {
+                    !allowed() -> buildBlockedState(this)
+                    remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS -> buildWaitingWindowEnd(this)
+                    else -> addView(media)
+                }
             }
             2 -> buildSettings(this)
             else -> {
                 addView(sectionTitle("대시보드", AppIcon.DASHBOARD))
                 addView(label(if (active != null) "지금은, 나에게 집중." else "잠깐의 충전, 충분한 여유.", 40f, true))
-                if (message.isNotBlank()) addView(label(message, 24f).apply { setTextColor(muted) })
+                val showingEndState = allowed() && remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS &&
+                    active == null && recovery == null && completed == null
+                if (message.isNotBlank() && !showingEndState) addView(label(message, 24f).apply { setTextColor(muted) })
                 addView(space(12))
                 when {
                     !allowed() -> buildBlockedState(this)
@@ -492,6 +552,10 @@ class MainActivity : Activity() {
     private fun buildRecommendations(parent: LinearLayout) {
         val profile = loadProfile(bucket()).let { if (learningOn) it else it.copy(feedback = emptyMap()) }
         val choices = ActivityRecommender.recommend(remainingWindowSeconds(), status, profile)
+        if (choices.isEmpty()) {
+            buildWaitingWindowEnd(parent)
+            return
+        }
         parent.addView(label("남은 시간에 맞춘 추천", 26f, true))
         parent.addView(label("한 가지를 골라 가볍게 시작해 보세요.", 24f).apply { setTextColor(muted) })
         val width = resources.configuration.screenWidthDp
@@ -534,13 +598,25 @@ class MainActivity : Activity() {
             }
             parent.addView(cards, LinearLayout.LayoutParams(-1, -2))
         }
-        if (choices.isEmpty()) parent.addView(surfaceCard().apply {
-            addView(sectionTitle("이제 마무리할 시간", AppIcon.CLOCK))
-            addView(label("새 활동은 다음 대기시간에 만나세요.", 26f))
-        })
         parent.addView(space(16))
         parent.addView(sectionTitle("언제든 멈춰도 괜찮아요", AppIcon.SHIELD))
         parent.addView(label("활동 뒤에는 마무리할 여유를 남겨둘게요.", 23f).apply { setTextColor(muted) })
+    }
+
+    private fun buildWaitingWindowEnd(parent: LinearLayout) {
+        val remaining = remainingWindowSeconds()
+        parent.addView(surfaceCard().apply {
+            addView(sectionTitle("대기시간", AppIcon.CLOCK))
+            addView(label(if (remaining == 0) "이번 대기시간이 끝났어요." else "잠시 마무리할 시간이에요.", 34f, true))
+            addView(label(if (remaining == 0) "더 머무를 예정이라면 새 시간을 선택해 주세요."
+                else "새 활동을 시작하기에는 남은 시간이 짧아요. 더 기다린다면 시간을 다시 정할 수 있어요.", 24f).apply { setTextColor(muted) })
+            addView(space(16))
+            addView(button("${windowMinutes}분 대기시간 새로 설정", true, allowed()) {
+                resetWaitingWindow(windowMinutes)
+            }.apply { withIcon(AppIcon.RESET, palette.onAccent) })
+            addView(button("다른 시간 선택", false, allowed()) { resetWaitingWindow() }.apply { withIcon(AppIcon.CLOCK) })
+            addView(label("새 시간을 정해도 차량의 충전 설정은 바뀌지 않아요.", 22f).apply { setTextColor(muted) })
+        })
     }
 
     private fun startActivity(activity: OwnActivity) {
@@ -675,7 +751,7 @@ class MainActivity : Activity() {
         themeMode = mode
         prefs.edit().putString("themeMode", mode.name).apply()
         palette = AppTheme.palette(this, mode)
-        render()
+        render(preserveScroll = true)
     }
 
     @Suppress("DEPRECATION")
