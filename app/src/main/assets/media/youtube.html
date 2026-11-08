@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com; style-src 'unsafe-inline'; frame-src https://www.youtube.com; connect-src https://www.youtube.com; img-src https: data:; base-uri 'none'; form-action 'none'">
+  <title>YouTube 공식 예제</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 12px; background: #f4f5f7; color: #1c1f24; font: 24px/1.4 sans-serif; }
+    #player { width: 100%; height: calc(100vh - 156px); min-height: 220px; background: #18202a; }
+    iframe { display: block; width: 100%; border: 0; }
+    p { margin: 8px 0; }
+    a { color: #315f9e; min-height: 64px; display: inline-flex; align-items: center; }
+  </style>
+</head>
+<body>
+  <div id="player" aria-label="YouTube 공식 동영상 플레이어"></div>
+  <p id="message" role="status">YouTube 플레이어를 연결하고 있어요.</p>
+  <p><a href="https://www.youtube.com/watch?v=M7lc1UVf-VE">YouTube에서 공식 예제 열기</a></p>
+  <script>
+    'use strict';
+    // ID is the sample in Google's IFrame API Getting started documentation.
+    // No invented title, runtime, API key, viewing history or native JS bridge.
+    let player;
+    let ready = false;
+    window.binteumStatus = {state: 'loading'};
+    function report(state, code, message) {
+      window.binteumStatus = {state: state, code: code || ''};
+      if (message) document.getElementById('message').textContent = message;
+    }
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('player', {
+        width: '100%', height: '240', videoId: 'M7lc1UVf-VE',
+        playerVars: {autoplay: 0, controls: 1, fs: 0, origin: '__APP_ORIGIN__'},
+        events: {
+          onReady: function () {
+            ready = true;
+            report('ready', '', '재생 버튼을 누르면 YouTube가 재생을 시도합니다.');
+          },
+          onStateChange: function (event) {
+            const states = {'-1': 'ready', '0': 'ended', '1': 'playing', '2': 'paused', '3': 'buffering', '5': 'ready'};
+            const labels = {'-1': '재생 버튼을 눌러 주세요.', '0': '영상이 끝났어요.', '1': 'YouTube에서 재생 중', '2': '일시정지', '3': '불러오는 중', '5': '재생 버튼을 눌러 주세요.'};
+            report(states[event.data] || 'loading', '', labels[event.data]);
+          },
+          onError: function (event) {
+            ready = true;
+            report('error', String(event.data), '이 환경에서 재생하지 못했어요. 위에서 다시 열거나 웹 휴식을 선택해 주세요.');
+          },
+          onAutoplayBlocked: function () {
+            report('autoplay_blocked', '', '플레이어의 재생 버튼을 직접 눌러 주세요.');
+          }
+        }
+      });
+    };
+    const script = document.createElement('script');
+    script.src = 'https://www.youtube.com/iframe_api';
+    script.onerror = function () { report('error', 'script', 'YouTube에 연결하지 못했어요.'); };
+    document.head.appendChild(script);
+    setTimeout(function () {
+      if (!ready) report('error', 'timeout', '연결이 지연되고 있어요. 다시 열거나 웹 휴식을 선택해 주세요.');
+    }, 20000);
+    // Native lifecycle destruction is the safety boundary. This is only an
+    // additional browser visibility safeguard; it never auto-resumes playback.
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && player && player.pauseVideo) player.pauseVideo();
+    });
+  </script>
+</body>
+</html>

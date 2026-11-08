@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>60초 눈 쉬기</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; color: #1c1f24; background: #f4f5f7; text-align: center; font: 24px/1.4 sans-serif; }
+    h1 { font-size: 28px; margin: 0 0 8px; }
+    #time { margin: 12px auto; font-size: 48px; font-variant-numeric: tabular-nums; }
+    p { margin: 8px 0; }
+    button { min-height: 64px; min-width: 140px; margin: 6px; padding: 10px 24px; border: 0; border-radius: 16px; font: inherit; background: #263749; color: white; }
+    #stop { background: #e2e5ea; color: #1c1f24; }
+  </style>
+</head>
+<body>
+  <h1>잠시 눈 쉬기</h1>
+  <p>화면에서 눈을 떼고, 편안한 자세로 쉬어 보세요.</p>
+  <div id="time" aria-label="남은 휴식 시간">1:00</div>
+  <p id="message" role="status">시작하면 60초를 셉니다.</p>
+  <button id="start" type="button">시작</button>
+  <button id="stop" type="button">멈추기</button>
+  <script>
+    'use strict';
+    window.binteumStatus = {state: 'rest_ready'};
+    let interval = null;
+    let endAt = 0;
+    const time = document.getElementById('time');
+    const message = document.getElementById('message');
+    function stop() {
+      clearInterval(interval); interval = null;
+      window.binteumStatus = {state: 'rest_paused'};
+      message.textContent = '멈췄어요. 시작을 누르면 60초를 새로 셉니다.';
+    }
+    function tick() {
+      const seconds = Math.max(0, Math.ceil((endAt - performance.now()) / 1000));
+      time.textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+      if (seconds === 0) {
+        clearInterval(interval); interval = null;
+        window.binteumStatus = {state: 'rest_complete'};
+        message.textContent = '60초가 지났어요. 편안하게 마무리해 주세요.';
+      }
+    }
+    document.getElementById('start').addEventListener('click', function () {
+      clearInterval(interval);
+      endAt = performance.now() + 60000;
+      window.binteumStatus = {state: 'rest_running'};
+      message.textContent = '화면을 계속 보고 있지 않아도 괜찮아요.';
+      tick(); interval = setInterval(tick, 250);
+    });
+    document.getElementById('stop').addEventListener('click', stop);
+    document.addEventListener('visibilitychange', function () { if (document.hidden && interval) stop(); });
+  </script>
+</body>
+</html>

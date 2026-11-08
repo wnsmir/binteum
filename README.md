@@ -2,7 +2,7 @@
 
 전기차 충전 및 정차 대기 중 목표 배터리 잔량과 사용자가 정한 시간에 맞춰 짧은 활동을 선택하고 마무리하도록 돕는 Pleos Connect 앱의 개발 시작 프로젝트입니다.
 
-현재 앱은 **모의 차량 데이터 시연 버전**입니다. 실제 Vehicle SDK, CarUxRestrictions, TTS, Gleo, 휴대폰 알림, 자동 카운트다운은 아직 연결하지 않았습니다. 차량의 충전 한도를 바꾸거나 충전을 종료하지 않습니다.
+현재 앱은 **첫 기능 구현 버전**입니다. Pleos Vehicle 2.3.2의 잔량 읽기, AAOS 실제 충전 상태·CarUxRestrictions, 시간별 자체 활동 추천, 카운트다운, 로컬 취향 저장, WebView 미디어 화면을 연결했습니다. 실제 차량 값 수신과 YouTube 재생은 아직 기기 검증 전입니다. 차량의 충전 한도를 바꾸거나 충전을 종료하지 않습니다. [구현·검증 상태](docs/implementation-status.md)
 
 ## 개발 환경
 
@@ -35,20 +35,22 @@ JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 
 
 ## 프로젝트 구성
 
-- `app/`: 모의 상태를 조작해 보는 네이티브 Android 화면
-- `core/`: 차량 상태 모델, 목표 도달 판단, 데이터 유효성, 중복 방지, 시간 예산 계산
+- `app/`: 차량 데이터 어댑터, 충전 상태·활동·설정 화면, WebView 콘텐츠
+- `core/`: 차량 상태 모델, 목표 도달 판단, 시간 예산, 활동 추천·평가 중복 방지
 - `scripts/`: 프로젝트 범위 환경 확인과 Gradle, Pleos AVD 및 Virtual Console 실행
 - `.github/workflows/android.yml`: 단위 테스트, APK 빌드, lint
 - `docs/product-plan.md`: 공동작업용 제품 기획과 MVP 완료 기준
 
 ## 콘텐츠와 개인화 확장 계획
 
-2026년 11월 8일 작성한 다음 문서는 앞으로 구현할 설계이며 현재 앱에 연결된 기능이 아닙니다. 차량 내 기본 세션을 먼저 완성하고, 미디어·장소·외출은 실제 공급자와 기기 검증 결과에 따라 확장합니다.
+2026년 11월 8일 작성한 확장 설계입니다. 자체 활동·로컬 개인화·웹 미디어의 첫 구현을 시작했으며, 장소·외출·서버 API는 후속 범위입니다. 현재 구현 여부는 구현·검증 상태 문서를 기준으로 확인합니다.
 
 - [경험 확장 실행 계획](docs/experience-plan.md): 시간별 활동, YouTube·웹·주변 산책과 간식, 제출까지 일정
 - [UI 명세](docs/ui-spec.md): 추천·진행·종료·휴대폰 인계 화면과 오류 상태
 - [API 설계](docs/api-spec.md) 및 [OpenAPI 3.1 계약](docs/api/openapi.json): 앱 내부 경계와 BFF 4개 경로
 - [추천과 개인화 설계](docs/recommendation-design.md): 시간·안전 필터, 직접 선호와 자체 평가, 이후 밴딧 실험
+- [공식 차량 API 전체 목록](docs/vehicle-api-matrix.md): 19개 영역·배포물 확인 440개, 권한과 연결 여부
+- [웹 미디어 구현](docs/web-media-integration.md): YouTube 공식 IFrame, 자체 웹 콘텐츠, 오류와 중단 처리
 
 ## 함께 개발하기
 
@@ -58,13 +60,13 @@ JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 
 
 ## 현재 확인한 결과
 
-2026년 11월 8일 기준, 로컬 JBR 21.0.9에서 core 테스트 9개와 debug APK 빌드가 성공했습니다. lint는 오류 0개, 고정한 SDK와 Gradle의 최신버전 안내 경고 3개입니다.
+최종 검증 명령과 결과는 [구현·검증 상태](docs/implementation-status.md)에 기록합니다. core 테스트, debug APK 빌드와 lint를 함께 실행합니다.
 
 - APK: `app/build/outputs/apk/debug/app-debug.apk`
 - 테스트: `core/build/reports/tests/test/index.html`
 - lint: `app/build/reports/lint-results-debug.html`
 
-목표 도달 후 상태 유지, 동일 목표 중복 방지, 목표 전 충전 중단, 데이터 지연과 누락, 주행·휴면 시 알림 억제, 회전 후 상태 보존, 시간 예산 경계값을 점검했습니다. 이 결과는 실제 차량 또는 Pleos SDK 통합 검증이 아닙니다.
+단위 테스트는 목표 도달·중단·제한·데이터 지연 상태와 시간 예산 경계, 선호 순위, 완료 확인과 평가 중복 방지를 확인합니다. 실제 기기에서의 권한·차량 값·화면·영상 재생 검증과 구분합니다.
 
 ## Pleos 연결
 
@@ -93,15 +95,17 @@ adb -s VERIFIED_SERIAL shell am start -n com.binteum.app/.MainActivity
 adb -s VERIFIED_SERIAL forward tcp:8088 tcp:8088
 ```
 
-Virtual Console은 `http://127.0.0.1:8088/`에서 엽니다. 이 Mac에서는 포워딩 후 HTTP 200과 Pleos Connect Virtual Console 응답을 확인했습니다. 현재 mock 앱은 Console의 실제 SDK 값을 읽지 않으며, Console에서 차량 상태를 바꿔 앱에 반영하는 통합 검증은 아직 수행하지 않았습니다.
+Virtual Console은 `http://127.0.0.1:8088/`에서 엽니다. 이 Mac에서는 포워딩 후 HTTP 200과 Pleos Connect Virtual Console 응답을 확인했습니다. 앱의 기본 입력은 실제 SDK 어댑터이며, `나의 설정 → 차량 데이터 권한 허용`에서 Android 차량 에너지 읽기 권한을 요청합니다. 미지원·권한 거부·안전 상태 미확인일 때 활동을 차단합니다. Console에서 차량 상태를 바꿔 앱에 반영하는 통합 검증은 아직 수행하지 않았습니다. debug 빌드의 시연 모드는 명시적으로 켜야 하며 화면에 모의 데이터임을 표시합니다.
+
+이 Mac에서는 에뮬레이터가 호스트의 IPv6 링크 로컬 DNS를 자동으로 사용하지 못했습니다. 기기를 종료한 뒤 `./scripts/start-pleos.sh -dns-server 8.8.8.8`로 시작해 YouTube 도메인 해석을 확인했습니다. 해당 실행에만 적용한 옵션이며, 네트워크 연결 확인이 영상 재생 검증을 뜻하지는 않습니다. [Android 에뮬레이터 DNS](https://developer.android.com/studio/run/emulator-networking-dns)
 
 ## 다음 구현
 
-1. 실제 SDK 패키지와 메서드 서명, 권한, capability를 확인하고 `VehicleDataSource`를 구현합니다.
-2. CarUxRestrictions와 최신 안전 신호를 연결합니다. 기어 P만으로 안전 조건을 통과시키지 않습니다.
-3. 목표와 대기시간 입력, 자체 활동 콘텐츠, 실제 타이머와 세션 저장을 구현합니다.
-4. 목표 도달·충전 중단·시간 종료·감시 불가를 구분하고 TTS와 오디오 포커스를 연결합니다.
-5. 기기에서 재시작·데이터 끊김·주행 제한·Suspend를 검증합니다.
+1. 기기에서 권한 허용·거부와 실제 SOC·충전 상태·UX 제한을 검증합니다.
+2. 자체 활동·복구·시간 종료와 WebView 플레이어를 전체 화면 및 분할 창에서 검수합니다.
+3. TTS와 오디오 포커스를 연결하고 목표 도달·중단·화면 이탈 시 중지 동작을 검증합니다.
+4. 실제 장소·도보 경로 제공사와 휴대폰 인계를 연결한 뒤 외출 추천을 추가합니다.
+5. 명시적 자체 활동 평가를 충분히 모은 뒤 시간·상황별 밴딧 실험을 검토합니다.
 6. 승인과 실행 가능성이 확인되면 Gleo 입력 경로를 추가합니다.
 
 배터리 데이터가 없을 때 수동 타이머를 제공할 수 있지만, 안전 상태가 불명확할 때 상세 조작을 허용하는 우회 수단으로 사용하지 않습니다. 차 밖 알림, 외출 추천, 정밀 충전 ETA, 시트 제어와 주문·결제는 후속 범위입니다.

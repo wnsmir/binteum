@@ -1,6 +1,9 @@
 package com.binteum.core
 
-/** A vehicle timestamp, not the time at which a cached value was read. */
+/**
+ * Observation time, not UI render time. If the provider omits the original vehicle timestamp,
+ * adapters use the read-request start conservatively; this cannot prove upstream cache freshness.
+ */
 data class VehicleSnapshot(
     val stateOfCharge: Int?,
     val charging: Boolean?,

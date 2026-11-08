@@ -6,6 +6,8 @@ android {
     namespace = "com.binteum.app"
     compileSdk = 34
     buildToolsVersion = "36.1.0"
+    useLibrary("android.car")
+    buildFeatures { buildConfig = true }
     defaultConfig {
         applicationId = "com.binteum.app"
         minSdk = 28
@@ -19,4 +21,7 @@ android {
     }
 }
 kotlin { jvmToolchain(21) }
-dependencies { implementation(project(":core")) }
+dependencies {
+    implementation(project(":core"))
+    implementation("ai.pleos.playground:Vehicle:2.3.2")
+}
