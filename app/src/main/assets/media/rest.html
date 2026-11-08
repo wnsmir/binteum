@@ -6,22 +6,38 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <title>60초 눈 쉬기</title>
   <style>
+    :root {
+      color-scheme: __COLOR_SCHEME__;
+      --app-bg: #fff; --app-surface: #eeeee6; --app-text: #20241e;
+      --app-muted: #606659; --app-accent: #c9f58f; --app-on-accent: #15200f;
+      --app-border: #dddfd4; __THEME_VARS__
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; padding: 24px; color: #1c1f24; background: #f4f5f7; text-align: center; font: 24px/1.4 sans-serif; }
-    h1 { font-size: 28px; margin: 0 0 8px; }
-    #time { margin: 12px auto; font-size: 48px; font-variant-numeric: tabular-nums; }
-    p { margin: 8px 0; }
-    button { min-height: 64px; min-width: 140px; margin: 6px; padding: 10px 24px; border: 0; border-radius: 16px; font: inherit; background: #263749; color: white; }
-    #stop { background: #e2e5ea; color: #1c1f24; }
+    body { margin: 0; padding: 28px 24px; color: var(--app-text); background: var(--app-bg); text-align: center; font: 24px/1.4 sans-serif; }
+    main { max-width: 920px; margin: auto; }
+    h1 { font-size: 30px; margin: 0 0 10px; font-weight: 600; }
+    #time { margin: 16px auto 12px; font-size: 64px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -2px; }
+    p { margin: 8px 0; color: var(--app-muted); }
+    .track { width: min(360px, 80%); height: 6px; margin: 0 auto 18px; border-radius: 10px; background: var(--app-surface); overflow: hidden; }
+    #progress { display: block; width: 0; height: 100%; background: var(--app-accent); border-radius: inherit; }
+    .actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-top: 18px; }
+    button { min-height: 64px; min-width: 160px; padding: 12px 28px; border: 0; border-radius: 18px; font: inherit; background: var(--app-accent); color: var(--app-on-accent); }
+    button:focus-visible { outline: 3px solid var(--app-text); outline-offset: 4px; }
+    #stop { background: var(--app-surface); color: var(--app-text); }
   </style>
 </head>
 <body>
-  <h1>잠시 눈 쉬기</h1>
-  <p>화면에서 눈을 떼고, 편안한 자세로 쉬어 보세요.</p>
-  <div id="time" aria-label="남은 휴식 시간">1:00</div>
-  <p id="message" role="status">시작하면 60초를 셉니다.</p>
-  <button id="start" type="button">시작</button>
-  <button id="stop" type="button">멈추기</button>
+  <main>
+    <h1>잠시, 눈을 쉬게 해 주세요</h1>
+    <p>화면을 내려놓고 편안한 자세로 쉬어 보세요.</p>
+    <div id="time" aria-label="남은 휴식 시간">1:00</div>
+    <div class="track" aria-hidden="true"><span id="progress"></span></div>
+    <p id="message" role="status">준비되면 시작해 주세요.</p>
+    <div class="actions">
+      <button id="start" type="button">휴식 시작</button>
+      <button id="stop" type="button">멈추기</button>
+    </div>
+  </main>
   <script>
     'use strict';
     window.binteumStatus = {state: 'rest_ready'};
@@ -37,6 +53,7 @@
     function tick() {
       const seconds = Math.max(0, Math.ceil((endAt - performance.now()) / 1000));
       time.textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+      document.getElementById('progress').style.width = ((60 - seconds) / 60 * 100) + '%';
       if (seconds === 0) {
         clearInterval(interval); interval = null;
         window.binteumStatus = {state: 'rest_complete'};

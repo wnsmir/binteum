@@ -5,11 +5,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.Gravity
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -22,11 +25,16 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONObject
 import org.json.JSONTokener
-import com.binteum.app.R
+import com.binteum.app.ui.AppIcon
+import com.binteum.app.ui.AppPalette
+import com.binteum.app.ui.AppTheme
+import com.binteum.app.ui.IconDrawable
+import com.binteum.app.ui.ThemeMode
 
 /**
  * An inline, parked-only web surface. The host owns fresh vehicle/UX state.
@@ -41,10 +49,23 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         YOUTUBE("media/youtube.html"), REST("media/rest.html")
     }
 
+    private data class ThemedButton(val view: Button, val icon: AppIcon, val primary: Boolean)
+    private data class Launcher(val page: Page, val view: LinearLayout)
+
     private val handler = Handler(Looper.getMainLooper())
     private val status = TextView(context)
+    private val currentTitle = TextView(context)
     private val frame = FrameLayout(context)
+    private val launcherRow = LinearLayout(context)
     private val launchButtons = mutableListOf<Button>()
+    private val launchers = mutableListOf<Launcher>()
+    private val primaryText = mutableListOf<TextView>()
+    private val secondaryText = mutableListOf<TextView>()
+    private val themedButtons = mutableListOf<ThemedButton>()
+    private val iconViews = mutableListOf<Pair<ImageView, AppIcon>>()
+    private lateinit var reopenButton: Button
+    private lateinit var closeButton: Button
+    private var palette = AppTheme.palette(context, ThemeMode.SYSTEM)
     private var webView: WebView? = null
     private var selectedPage: Page? = null
     private var playbackAllowed = false
@@ -52,43 +73,80 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private var generation = 0
     private var pollingGeneration = -1
     private var lastWebState = ""
+    private var hostReparentDepth = 0
 
     init {
         orientation = VERTICAL
-        setPadding(dp(16), dp(12), dp(16), dp(12))
-        setBackgroundColor(Color.rgb(244, 245, 247))
-        addView(TextView(context).apply {
-            text = "차 안에서 웹 콘텐츠 열기"
-            textSize = 26f
-            setTextColor(Color.rgb(28, 31, 36))
-        })
-        addView(TextView(context).apply {
-            setText(R.string.web_media_notice)
-            textSize = 24f
-            setTextColor(Color.rgb(74, 78, 85))
-            setPadding(0, dp(8), 0, dp(8))
-        })
-        val firstRow = buttonRow()
-        addLaunchButton(firstRow, "예제 영상 열기") { open(Page.YOUTUBE) }
-        addLaunchButton(firstRow, "60초 웹 휴식") { open(Page.REST) }
-        val secondRow = buttonRow()
-        addLaunchButton(secondRow, "다시 열기") {
+        setPadding(0, dp(4), 0, 0)
+        launcherRow.orientation = VERTICAL
+        addView(launcherRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        addLauncher(Page.YOUTUBE, AppIcon.PLAY, "공식 예제 영상", "YouTube · 광고와 로딩 시간이 추가될 수 있어요.", "영상 열기")
+        addLauncher(Page.REST, AppIcon.LEAF, "60초 눈 휴식", "화면에서 눈을 떼고 잠시 쉬어요. 인터넷 없이 이용할 수 있어요.", "휴식 열기")
+
+        currentTitle.textSize = 26f
+        currentTitle.setTypeface(null, Typeface.BOLD)
+        currentTitle.setPadding(0, dp(24), 0, dp(12))
+        primaryText += currentTitle
+        addView(currentTitle)
+        val actions = LinearLayout(context).apply { orientation = HORIZONTAL }
+        reopenButton = actionButton("다시 열기", AppIcon.RESET, false) {
             selectedPage?.let(::open) ?: setStatus("먼저 콘텐츠를 선택해 주세요.")
         }
-        secondRow.addView(styledButton("닫기").apply {
-            setOnClickListener {
-                destroySurface()
-                setStatus("콘텐츠를 닫았어요. 다시 보려면 직접 선택해 주세요.")
-            }
-        }, buttonLayout())
+        launchButtons += reopenButton
+        closeButton = actionButton("닫기", AppIcon.CLOSE, false) {
+            destroySurface()
+            setStatus("콘텐츠를 닫았어요. 다시 열려면 직접 선택해 주세요.")
+        }
+        actions.addView(reopenButton, actionLayout())
+        actions.addView(closeButton, actionLayout())
+        addView(actions)
         status.textSize = 24f
-        status.setTextColor(Color.rgb(74, 78, 85))
-        status.setPadding(0, dp(8), 0, dp(8))
+        status.setPadding(0, dp(14), 0, dp(16))
+        secondaryText += status
         addView(status)
         // Keep the player controls comfortably larger than YouTube's 200x200 minimum.
         addView(frame, LayoutParams(LayoutParams.MATCH_PARENT, dp(440)))
         frame.visibility = View.GONE
+        applyPalette(palette)
         setPlaybackAllowed(false, "차량의 정차·안전 상태를 확인하면 열 수 있어요.")
+    }
+
+    /** Recolors our surfaces only. Does not reload, resume, or touch YouTube's iframe UI. */
+    fun applyPalette(palette: AppPalette) {
+        this.palette = palette
+        setBackgroundColor(Color.TRANSPARENT)
+        primaryText.forEach { it.setTextColor(palette.text) }
+        secondaryText.forEach { it.setTextColor(palette.textMuted) }
+        iconViews.forEach { (view, icon) ->
+            view.background = rounded(palette.accent, dp(18))
+            view.setImageDrawable(IconDrawable(icon, palette.onAccent, dp(32)))
+        }
+        themedButtons.forEach { item ->
+            val foreground = if (item.primary) palette.onAccent else palette.text
+            item.view.setTextColor(foreground)
+            item.view.backgroundTintList = ColorStateList.valueOf(if (item.primary) palette.accent else palette.surfaceAlt)
+            item.view.setCompoundDrawablesRelativeWithIntrinsicBounds(IconDrawable(item.icon, foreground, dp(26)), null, null, null)
+        }
+        refreshPresentation()
+        webView?.let { view ->
+            view.setBackgroundColor(palette.surface)
+            applyHtmlPalette(view)
+        }
+    }
+
+    private fun applyHtmlPalette(view: WebView) {
+        // Fixed property names and color values only. No URL, user text or native bridge.
+        val colors = cssColors()
+        val scheme = JSONObject.quote(if (palette.dark) "dark" else "light")
+        view.evaluateJavascript("(function(){var c=$colors;Object.keys(c).forEach(function(k){document.documentElement.style.setProperty(k,c[k]);});document.documentElement.style.colorScheme=$scheme;})()", null)
+    }
+
+    /** Host uses a synchronous try/finally scope only when moving this visible, allowed panel. */
+    fun beginHostReparent() { if (!released) hostReparentDepth++ }
+
+    fun endHostReparent() {
+        if (hostReparentDepth > 0) hostReparentDepth--
+        if (hostReparentDepth == 0 && !isAttachedToWindow) pauseForHost()
     }
 
     /** Must be called on the UI thread. true never resumes or loads media. */
@@ -96,7 +154,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         if (released) return
         val wasAllowed = playbackAllowed
         playbackAllowed = allowed
-        launchButtons.forEach { it.isEnabled = allowed }
+        refreshActions()
         if (!allowed) {
             destroySurface()
             setStatus(reason)
@@ -115,18 +173,29 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         if (released) return
         playbackAllowed = false
         released = true
-        launchButtons.forEach { it.isEnabled = false }
+        refreshActions()
         destroySurface()
     }
 
     override fun onDetachedFromWindow() {
-        pauseForHost()
+        if (hostReparentDepth == 0) pauseForHost()
         super.onDetachedFromWindow()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w != oldw) {
+            val twoColumns = w - paddingLeft - paddingRight >= dp(800)
+            launcherRow.orientation = if (twoColumns) HORIZONTAL else VERTICAL
+            launchers.forEachIndexed { index, launcher ->
+                launcher.view.layoutParams = if (twoColumns) {
+                    LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+                        setMargins(if (index == 0) 0 else dp(8), 0, if (index == 0) dp(8) else 0, 0)
+                    }
+                } else LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 0, dp(12))
+                }
+            }
             frame.layoutParams?.let {
                 it.height = ((w - paddingLeft - paddingRight) * 9 / 16 + dp(144)).coerceIn(dp(400), dp(620))
                 frame.layoutParams = it
@@ -134,31 +203,97 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun buttonRow() = LinearLayout(context).apply {
-        orientation = HORIZONTAL
-        this@WebMediaPanel.addView(this, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+    private fun actionLayout() = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+        setMargins(dp(4), 0, dp(4), 0)
     }
 
-    private fun buttonLayout() = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-        setMargins(dp(3), dp(3), dp(3), dp(3))
-    }
-
-    private fun styledButton(label: String) = Button(context).apply {
-        text = label
-        textSize = 24f
-        isAllCaps = false
-        minHeight = dp(64)
-        minimumHeight = dp(64)
-        setTextColor(Color.rgb(30, 34, 40))
-        backgroundTintList = ColorStateList.valueOf(Color.rgb(226, 229, 234))
-    }
-
-    private fun addLaunchButton(row: LinearLayout, label: String, action: () -> Unit) {
-        val button = styledButton(label).apply {
-            setOnClickListener { if (playbackAllowed && !released) action() }
+    private fun actionButton(label: String, icon: AppIcon, primary: Boolean, action: () -> Unit): Button {
+        val view = Button(context).apply {
+            text = label
+            textSize = 24f
+            isAllCaps = false
+            minHeight = dp(64)
+            minimumHeight = dp(64)
+            compoundDrawablePadding = dp(12)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            background = rounded(palette.surfaceAlt, dp(18))
+            setOnClickListener { action() }
         }
+        themedButtons += ThemedButton(view, icon, primary)
+        return view
+    }
+
+    private fun addLauncher(page: Page, icon: AppIcon, title: String, description: String, action: String) {
+        val card = LinearLayout(context).apply {
+            orientation = VERTICAL
+            minimumWidth = dp(280)
+            setPadding(dp(24), dp(24), dp(24), dp(20))
+        }
+        val heading = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val image = ImageView(context).apply { setPadding(dp(12), dp(12), dp(12), dp(12)); importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
+        iconViews += image to icon
+        heading.addView(image, LayoutParams(dp(56), dp(56)))
+        val titleView = TextView(context).apply {
+            text = title; textSize = 28f; setTypeface(null, Typeface.BOLD)
+            setPadding(dp(16), 0, 0, 0)
+        }
+        primaryText += titleView
+        heading.addView(titleView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(heading)
+        val descriptionView = TextView(context).apply {
+            text = description; textSize = 24f; setPadding(0, dp(16), 0, dp(18))
+        }
+        secondaryText += descriptionView
+        card.addView(descriptionView)
+        val button = actionButton(action, AppIcon.PLAY, page == Page.YOUTUBE) {
+            if (playbackAllowed && !released) open(page)
+        }
+        card.addView(button, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         launchButtons += button
-        row.addView(button, buttonLayout())
+        launcherRow.addView(card, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+        launchers += Launcher(page, card)
+    }
+
+    private fun refreshActions() {
+        launchButtons.forEach { it.isEnabled = playbackAllowed && !released }
+        if (::reopenButton.isInitialized) reopenButton.isEnabled = playbackAllowed && !released && selectedPage != null
+        if (::closeButton.isInitialized) closeButton.isEnabled = webView != null && !released
+        themedButtons.forEach { it.view.alpha = if (it.view.isEnabled) 1f else 0.42f }
+    }
+
+    private fun refreshPresentation() {
+        val title = when (selectedPage) { Page.YOUTUBE -> "공식 예제 영상"; Page.REST -> "60초 눈 휴식"; null -> null }
+        currentTitle.text = when {
+            webView != null -> "현재 콘텐츠 · $title"
+            title != null -> "최근 콘텐츠 · $title"
+            else -> "콘텐츠를 선택해 주세요"
+        }
+        launchers.forEach { item ->
+            item.view.background = rounded(palette.surface, dp(24), if (webView != null && selectedPage == item.page) palette.accent else palette.border)
+        }
+        refreshActions()
+    }
+
+    private fun rounded(fill: Int, radius: Int, stroke: Int? = null) = GradientDrawable().apply {
+        setColor(fill); cornerRadius = radius.toFloat()
+        stroke?.let { setStroke(dp(1), it) }
+    }
+
+    private fun cssColors() = JSONObject().apply {
+        put("--app-bg", cssColor(palette.surface))
+        put("--app-surface", cssColor(palette.surfaceAlt))
+        put("--app-text", cssColor(palette.text))
+        put("--app-muted", cssColor(palette.textMuted))
+        put("--app-accent", cssColor(palette.accent))
+        put("--app-on-accent", cssColor(palette.onAccent))
+        put("--app-border", cssColor(palette.border))
+    }
+
+    private fun cssColor(color: Int) = "#%06x".format(color and 0xffffff)
+
+    private fun themeDeclarations(): String {
+        val colors = cssColors()
+        return colors.keys().asSequence().joinToString("") { key -> "$key:${colors.getString(key)};" }
     }
 
     @Suppress("DEPRECATION", "SetJavaScriptEnabled")
@@ -170,12 +305,15 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
         destroySurface()
         selectedPage = page
+        refreshPresentation()
         lastWebState = ""
         val origin = "https://${context.packageName.lowercase()}"
         val baseUrl = "$origin/media/"
         val html = try {
             context.assets.open(page.asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 .replace("__APP_ORIGIN__", origin)
+                .replace("__THEME_VARS__", themeDeclarations())
+                .replace("__COLOR_SCHEME__", if (palette.dark) "dark" else "light")
         } catch (_: Exception) {
             setStatus("웹 콘텐츠 파일을 열지 못했어요. 앱을 다시 실행해 주세요.")
             return
@@ -186,7 +324,8 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
         webView = instance
         val token = generation
-        instance.setBackgroundColor(Color.rgb(244, 245, 247))
+        instance.setBackgroundColor(palette.surface)
+        refreshPresentation()
         instance.settings.apply {
             javaScriptEnabled = true // Only our packaged HTML and the official player use JS.
             domStorageEnabled = true
@@ -225,6 +364,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
 
             override fun onPageFinished(view: WebView, url: String) {
                 if (webView === view && token == generation && pollingGeneration != token) {
+                    applyHtmlPalette(view)
                     pollingGeneration = token
                     pollState(view, token)
                 }
@@ -255,6 +395,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
                     frame.removeView(view)
                     frame.visibility = View.GONE
                     view.destroy()
+                    refreshPresentation()
                     setStatus("웹 화면이 종료됐어요. 직접 다시 열거나 다른 활동을 선택해 주세요.")
                 }
                 return true
@@ -339,6 +480,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
         frame.removeAllViews()
         frame.visibility = View.GONE
+        refreshPresentation()
     }
 
     private fun setStatus(message: String) { status.text = message }

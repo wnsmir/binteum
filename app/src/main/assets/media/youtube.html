@@ -7,18 +7,28 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com; style-src 'unsafe-inline'; frame-src https://www.youtube.com; connect-src https://www.youtube.com; img-src https: data:; base-uri 'none'; form-action 'none'">
   <title>YouTube 공식 예제</title>
   <style>
+    :root {
+      color-scheme: __COLOR_SCHEME__;
+      --app-bg: #fff; --app-surface: #eeeee6; --app-text: #20241e;
+      --app-muted: #606659; --app-accent: #c9f58f; --app-on-accent: #15200f;
+      --app-border: #dddfd4; __THEME_VARS__
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; padding: 12px; background: #f4f5f7; color: #1c1f24; font: 24px/1.4 sans-serif; }
-    #player { width: 100%; height: calc(100vh - 156px); min-height: 220px; background: #18202a; }
+    body { margin: 0; padding: 0; background: var(--app-bg); color: var(--app-text); font: 24px/1.4 sans-serif; }
+    #player { width: 100%; height: calc(100vh - 112px); min-height: 220px; background: #111; }
     iframe { display: block; width: 100%; border: 0; }
-    p { margin: 8px 0; }
-    a { color: #315f9e; min-height: 64px; display: inline-flex; align-items: center; }
+    footer { display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; padding: 16px 20px; }
+    p { margin: 0; color: var(--app-muted); }
+    a { color: var(--app-text); min-height: 64px; display: inline-flex; align-items: center; text-underline-offset: 6px; }
+    a:focus-visible { outline: 3px solid var(--app-accent); outline-offset: 5px; }
   </style>
 </head>
 <body>
   <div id="player" aria-label="YouTube 공식 동영상 플레이어"></div>
-  <p id="message" role="status">YouTube 플레이어를 연결하고 있어요.</p>
-  <p><a href="https://www.youtube.com/watch?v=M7lc1UVf-VE">YouTube에서 공식 예제 열기</a></p>
+  <footer>
+    <p id="message" role="status">플레이어 연결 중</p>
+    <a href="https://www.youtube.com/watch?v=M7lc1UVf-VE">YouTube에서 열기 ↗</a>
+  </footer>
   <script>
     'use strict';
     // ID is the sample in Google's IFrame API Getting started documentation.

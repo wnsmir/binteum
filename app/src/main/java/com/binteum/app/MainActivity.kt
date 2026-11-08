@@ -3,11 +3,14 @@ package com.binteum.app
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.net.Uri
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -16,12 +19,16 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsetsController
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.binteum.app.media.WebMediaPanel
 import com.binteum.app.vehicle.PleosVehicleDataSource
+import com.binteum.app.ui.*
 import com.binteum.core.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,10 +36,12 @@ import java.util.UUID
 import kotlin.math.abs
 
 class MainActivity : Activity() {
-    private val ink = Color.rgb(27, 43, 38)
-    private val muted = Color.rgb(91, 108, 101)
-    private val mint = Color.rgb(219, 239, 229)
-    private val paper = Color.rgb(249, 250, 248)
+    private var themeMode = ThemeMode.SYSTEM
+    private lateinit var palette: AppPalette
+    private val ink get() = palette.text
+    private val muted get() = palette.textMuted
+    private val mint get() = palette.accent
+    private val paper get() = palette.background
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("binteum_experience", MODE_PRIVATE) }
     private lateinit var source: VehicleDataSource
@@ -48,6 +57,8 @@ class MainActivity : Activity() {
     private var demoMode = false
     private var demoScenario = 0
     private var tab = 0
+    private var chargeControlsExpanded = false
+    private var developerOptionsExpanded = false
     private var learningOn = true
     private var windowEndElapsed = 0L
     private var windowEndWall = 0L
@@ -62,6 +73,7 @@ class MainActivity : Activity() {
     private var windowLabel: TextView? = null
     private var timerLabel: TextView? = null
     private var diagnosticsLabel: TextView? = null
+    private var chargeGauge: ChargeGaugeView? = null
     private val timeButtons = mutableListOf<Button>()
     private var resetWindowButton: Button? = null
     private var lastWindowHasBudget = true
@@ -89,6 +101,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "SYSTEM") ?: "SYSTEM") }.getOrDefault(ThemeMode.SYSTEM)
+        palette = AppTheme.palette(this, themeMode)
         target = prefs.getInt("target", 80).takeIf { it in listOf(70, 80, 90) } ?: 80
         windowMinutes = prefs.getInt("windowMinutes", 20).takeIf { it in listOf(8, 20, 40, 60) } ?: 20
         learningOn = prefs.getBoolean("learningOn", true)
@@ -147,6 +161,12 @@ class MainActivity : Activity() {
 
     override fun onDestroy() { media.release(); super.onDestroy() }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        palette = AppTheme.palette(this, themeMode)
+        render()
+    }
+
     private fun makeSource(): VehicleDataSource = if (demoMode) DemoVehicleDataSource() else PleosVehicleDataSource(this)
 
     private fun acceptSnapshot(value: VehicleSnapshot) {
@@ -155,6 +175,9 @@ class MainActivity : Activity() {
         val result = if (value.observedAtMillis < sourceStartedAt) SessionResult(SessionStatus.WAITING_FOR_DATA)
             else session.update(value, System.currentTimeMillis())
         status = result.status
+        if (status == SessionStatus.CHARGING && previous != status && active == null && recovery == null) {
+            message = ""
+        }
         if (status != SessionStatus.CHARGING) {
             media.setPlaybackAllowed(false, statusText())
             if (active != null) {
@@ -226,103 +249,168 @@ class MainActivity : Activity() {
 
     private fun render() {
         if (!::media.isInitialized) return
-        val oldParent = media.parent as? ViewGroup
-        oldParent?.removeView(media)
-        timerLabel = null
-        diagnosticsLabel = null
-        timeButtons.clear()
-        val root = column().apply { setBackgroundColor(paper) }
-        val top = row().apply { setPadding(dp(28), dp(16), dp(28), dp(12)); gravity = Gravity.CENTER_VERTICAL }
-        top.addView(label("빈틈의실", 30f, true), LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(label(if (demoMode) "시연 모드 · 실제 차량 데이터 아님" else "PLEOS CONNECT · 차량 상태 읽기", 23f).apply {
-            setTextColor(if (demoMode) Color.rgb(146, 75, 25) else muted)
-        })
-        root.addView(top)
-        val wide = resources.configuration.screenWidthDp >= 900
-        val body = if (wide) row() else column()
-        val left = buildLeft()
-        val right = buildRight()
-        if (wide) {
-            body.addView(ScrollView(this).apply { isFillViewport = true; addView(left) }, LinearLayout.LayoutParams(0, -1, 29f))
-            body.addView(ScrollView(this).apply { isFillViewport = true; addView(right) }, LinearLayout.LayoutParams(0, -1, 71f))
-            root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
-        } else {
-            body.addView(left); body.addView(right)
-            root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        val preserveMedia = tab == 1 && allowed()
+        if (preserveMedia) media.beginHostReparent()
+        try {
+            (media.parent as? ViewGroup)?.removeView(media)
+            media.applyPalette(palette)
+            timerLabel = null; diagnosticsLabel = null; chargeGauge = null
+            timeButtons.clear()
+            window.statusBarColor = paper
+            window.navigationBarColor = palette.surface
+            val root = column().apply {
+                setBackgroundColor(paper)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isForceDarkAllowed = false
+            }
+            val top = row().apply { setPadding(dp(28), dp(12), dp(28), dp(12)); gravity = Gravity.CENTER_VERTICAL }
+            top.addView(icon(AppIcon.SPARKLES, palette.text, 32), LinearLayout.LayoutParams(dp(40), dp(40)))
+            top.addView(label("빈틈의실", 28f, true).apply { setPadding(dp(12), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
+            val compactHeader = resources.configuration.screenWidthDp < 650
+            top.addView(badge(if (demoMode) (if (compactHeader) "시연" else "시연 · 모의 데이터") else "차량 연결", if (demoMode) palette.warningSurface else palette.surfaceAlt,
+                if (demoMode) palette.warning else muted))
+            top.addView(iconButton(if (palette.dark) "라이트 모드" else "다크 모드", if (palette.dark) AppIcon.SUN else AppIcon.MOON) {
+                changeTheme(if (palette.dark) ThemeMode.LIGHT else ThemeMode.DARK)
+            }, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(16) })
+            root.addView(top)
+            val wide = resources.configuration.screenWidthDp >= 1100
+            val body = if (wide) row() else column()
+            val left = buildLeft(!wide)
+            val right = buildRight()
+            if (wide) {
+                val sideWidth = if (resources.configuration.screenWidthDp >= 1500) 350 else 320
+                body.setPadding(dp(16), 0, dp(16), dp(12))
+                body.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(left) },
+                    LinearLayout.LayoutParams(dp(sideWidth), -1))
+                body.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(right) },
+                    LinearLayout.LayoutParams(0, -1, 1f))
+                root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+            } else {
+                body.setPadding(dp(16), 0, dp(16), dp(12))
+                body.addView(left); body.addView(right)
+                root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+            }
+            val dock = row().apply {
+                gravity = Gravity.CENTER; setPadding(dp(20), dp(12), dp(20), dp(12)); setBackgroundColor(palette.surface)
+            }
+            val tabs = listOf("대시보드" to AppIcon.DASHBOARD, "미디어" to AppIcon.PLAY, "설정" to AppIcon.SETTINGS)
+            tabs.forEachIndexed { index, (name, glyph) ->
+                dock.addView(button(if (compactHeader && index == 0) "홈" else name, tab == index) {
+                    if (tab != index) {
+                        media.pauseForHost()
+                        if (active != null && index != 0) interruptActivity("활동을 중단했어요. 다른 시간을 골라 보세요.")
+                        tab = index; render()
+                    }
+                }.apply {
+                    minHeight = dp(72)
+                    if (compactHeader) {
+                        setPadding(dp(8), dp(10), dp(8), dp(10))
+                        setCompoundDrawablesRelativeWithIntrinsicBounds(null, IconDrawable(glyph, if (tab == index) palette.onAccent else muted, dp(26)), null, null)
+                        compoundDrawablePadding = dp(6)
+                    } else withIcon(glyph, if (tab == index) palette.onAccent else muted)
+                    contentDescription = "$name${if (tab == index) ", 선택됨" else ""}"
+                    isSelected = tab == index
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(6), 0, dp(6), 0) })
+            }
+            root.addView(dock)
+            setContentView(root)
+            updateSystemBars()
+            refreshMediaGate(); updateLabels()
+        } finally {
+            if (preserveMedia) media.endHostReparent()
         }
-        val tabs = row().apply { setPadding(dp(16), dp(8), dp(16), dp(8)); setBackgroundColor(Color.WHITE) }
-        listOf("충전의 틈", "웹·미디어", "나의 설정").forEachIndexed { index, name ->
-            tabs.addView(button(name, tab == index) {
-                if (tab != index) {
-                    media.pauseForHost()
-                    if (active != null && index != 0) interruptActivity("화면을 바꿔 활동을 중단했어요.")
-                    tab = index; render()
-                }
-            }, LinearLayout.LayoutParams(0, dp(72), 1f).apply { setMargins(dp(6), 0, dp(6), 0) })
-        }
-        root.addView(tabs)
-        setContentView(root)
-        refreshMediaGate()
-        updateLabels()
     }
 
-    private fun buildLeft(): LinearLayout = column().apply {
-        setPadding(dp(32), dp(28), dp(32), dp(28))
-        setBackgroundColor(Color.rgb(239, 242, 239))
-        addView(label("지금의 충전", 24f))
-        socLabel = label("—", 64f, true).also { addView(it) }
-        statusLabel = label(statusText(), 25f).also { addView(it) }
-        addView(CarSilhouetteView(this@MainActivity), LinearLayout.LayoutParams(-1, dp(180)))
-        addView(label("알림 받을 목표", 24f, true))
-        val targets = row()
-        listOf(70, 80, 90).forEach { value -> targets.addView(button("$value%", target == value, safeToConfigure()) {
-            if (safeToConfigure() && value != target) {
-                target = value; session = ChargingSession(target); persistTarget()
-                snapshot?.let(::acceptSnapshot); render()
+    private fun buildLeft(compact: Boolean): LinearLayout = column().apply {
+        setPadding(dp(24), dp(24), dp(24), dp(24))
+        background = rounded(palette.surface, 28)
+        addView(sectionTitle("지금의 충전", AppIcon.BATTERY))
+        if (compact) {
+            val summary = row().apply { gravity = Gravity.CENTER_VERTICAL }
+            socLabel = label("—", 56f, true).apply { setSingleLine(true) }.also {
+                summary.addView(it, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(20) })
             }
-        }, LinearLayout.LayoutParams(0, dp(72), 1f)) }
-        addView(targets)
+            statusLabel = label(statusText(), 24f).also { summary.addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
+            addView(summary)
+        } else {
+            val gaugeFrame = FrameLayout(this@MainActivity)
+            chargeGauge = ChargeGaugeView(this@MainActivity).also { gaugeFrame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
+            val number = column().apply { gravity = Gravity.CENTER }
+            socLabel = label("—", 64f, true).also { number.addView(it) }
+            number.addView(label("현재 배터리", 23f).apply { setTextColor(muted) })
+            gaugeFrame.addView(number, FrameLayout.LayoutParams(-1, -1))
+            addView(gaugeFrame, LinearLayout.LayoutParams(-1, dp(230)))
+            statusLabel = label(statusText(), 24f).apply { gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(16)) }.also { addView(it) }
+        }
+        val timeSummary = column().apply {
+            setPadding(dp(20), dp(12), dp(20), dp(12)); background = rounded(palette.surfaceAlt)
+            addView(sectionTitle("나의 대기시간", AppIcon.CLOCK))
+            windowLabel = label("", if (compact) 30f else 36f, true).also { addView(it) }
+            addView(label("마무리 여유 2분 포함", 22f).apply { setTextColor(muted) })
+        }
+        addView(timeSummary, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+        if (compact) addView(button(if (chargeControlsExpanded) "목표·시간 접기" else "목표·시간 설정") {
+            chargeControlsExpanded = !chargeControlsExpanded; render()
+        }.apply { withIcon(AppIcon.SETTINGS) })
+        if (!compact || chargeControlsExpanded) {
+            addView(label("알림 목표", 24f, true))
+            val targets = row()
+            listOf(70, 80, 90).forEach { value ->
+                targets.addView(button("$value%", target == value, safeToConfigure()) {
+                    if (safeToConfigure() && value != target) {
+                        target = value; session = ChargingSession(target); persistTarget()
+                        snapshot?.let(::acceptSnapshot); render()
+                    }
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), 0, dp(3), 0) })
+            }
+            addView(targets)
+            addView(label("사용할 시간", 24f, true).apply { setPadding(0, dp(24), 0, dp(10)) })
+            listOf(listOf(8, 20), listOf(40, 60)).forEach { pair ->
+                val times = row()
+                pair.forEach { minutes ->
+                    times.addView(button("${minutes}분", windowMinutes == minutes, allowed() && windowEndElapsed == 0L) {
+                        if (!allowed() || windowEndElapsed != 0L) return@button
+                        windowMinutes = minutes; prefs.edit().putInt("windowMinutes", minutes).apply(); render()
+                    }.also { timeButtons.add(it) }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), dp(4), dp(3), dp(4)) })
+                }
+                addView(times)
+            }
+            addView(label("선택한 시간이며 충전 완료 예상시간은 아니에요.", 22f).apply { setTextColor(muted) })
+        }
         if (status == SessionStatus.TARGET_REACHED || status == SessionStatus.INTERRUPTED) {
-            addView(button("새 충전 세션 시작", false, safeToConfigure()) {
+            addView(button("새 충전 세션", false, safeToConfigure()) {
                 if (safeToConfigure()) {
                     interruptActivity("새 충전 세션을 시작했어요.")
                     recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
                     session = ChargingSession(target); persistTarget(); saveCheckpoint()
                     snapshot?.let(::acceptSnapshot); render()
                 }
-            })
+            }.apply { withIcon(AppIcon.RESET) })
         }
-        addView(label("내가 정한 대기시간", 24f, true).apply { setPadding(0, dp(24), 0, dp(8)) })
-        val times = row()
-        listOf(8, 20, 40, 60).forEach { minutes -> times.addView(button("${minutes}분", windowMinutes == minutes,
-            allowed() && windowEndElapsed == 0L) {
-            if (!allowed() || windowEndElapsed != 0L) return@button
-            windowMinutes = minutes; prefs.edit().putInt("windowMinutes", minutes).apply(); render()
-        }.also { timeButtons.add(it) }, LinearLayout.LayoutParams(0, dp(72), 1f)) }
-        addView(times)
-        windowLabel = label("", 25f, true).also { addView(it) }
-        addView(label("충전 완료 예상시간이 아니에요.\n마무리 2분을 남겨둘게요.", 22f))
-        resetWindowButton = button("새 대기 시간 설정", false, allowed()) {
+        resetWindowButton = button("대기시간 다시 설정", false, allowed()) {
             if (!allowed()) return@button
-            media.pauseForHost()
-            interruptActivity("새 대기 시간을 선택해 주세요.")
+            media.pauseForHost(); interruptActivity("새 대기시간을 선택해 주세요.")
             recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
+            chargeControlsExpanded = true
             saveCheckpoint(); render()
-        }.also { addView(it) }
+        }.apply { withIcon(AppIcon.RESET) }.also { addView(it) }
     }
 
     private fun buildRight(): LinearLayout = column().apply {
-        setPadding(dp(40), dp(24), dp(40), dp(28))
+        setPadding(dp(32), dp(24), dp(16), dp(28))
         when (tab) {
             1 -> {
-                addView(label("가볍게 보고, 제때 쉬어요", 38f, true))
-                addView(label("공식 예제 영상과 자체 웹 활동 · 재생 이력으로 취향을 학습하지 않아요", 24f))
+                addView(sectionTitle("미디어", AppIcon.PLAY))
+                addView(label("보고, 쉬고, 다시 출발.", 40f, true))
+                addView(label("잠깐의 여유에 어울리는 콘텐츠", 24f).apply { setTextColor(muted) })
+                addView(space(16))
                 if (allowed()) addView(media) else buildBlockedState(this)
             }
             2 -> buildSettings(this)
             else -> {
-                addView(label(if (active != null) "지금은 나를 위한 시간" else "이 틈에, 무엇을 할까요?", 38f, true))
-                addView(label(message, 24f).apply { setTextColor(muted) })
+                addView(sectionTitle("대시보드", AppIcon.DASHBOARD))
+                addView(label(if (active != null) "지금은, 나에게 집중." else "잠깐의 충전, 충분한 여유.", 40f, true))
+                if (message.isNotBlank()) addView(label(message, 24f).apply { setTextColor(muted) })
+                addView(space(12))
                 when {
                     !allowed() -> buildBlockedState(this)
                     recovery != null -> {
@@ -366,7 +454,10 @@ class MainActivity : Activity() {
         if (started) source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
     }
 
-    private fun buildBlockedState(parent: LinearLayout) {
+    private fun buildBlockedState(container: LinearLayout) {
+        val parent = surfaceCard()
+        parent.addView(sectionTitle("연결 상태", AppIcon.SHIELD))
+        container.addView(parent)
         val missingPermission = !demoMode && !hasEnergyPermission() && status == SessionStatus.WAITING_FOR_DATA
         val heading = when {
             missingPermission -> "충전 상태를 읽을 수 있도록 허용해 주세요"
@@ -401,24 +492,55 @@ class MainActivity : Activity() {
     private fun buildRecommendations(parent: LinearLayout) {
         val profile = loadProfile(bucket()).let { if (learningOn) it else it.copy(feedback = emptyMap()) }
         val choices = ActivityRecommender.recommend(remainingWindowSeconds(), status, profile)
-        parent.addView(label("차 안에서 편안하게 · 준비된 자체 활동", 25f))
-        val cards = if (resources.configuration.screenWidthDp >= 1200) row() else column()
-        choices.forEachIndexed { index, choice ->
-            val card = column().apply {
-                setPadding(dp(28), dp(28), dp(28), dp(24)); background = rounded(if (index == 0) mint else Color.WHITE)
-                addView(label("0${index + 1}   /   ${choice.activity.durationSeconds / 60} MIN", 23f))
-                addView(label(choice.activity.title, 32f, true))
-                addView(label(choice.activity.instructions.first(), 24f))
-                addView(label(choice.reason, 22f).apply { setTextColor(muted) })
-                addView(button("시작하기  →", index == 0) { startActivity(choice.activity) })
+        parent.addView(label("남은 시간에 맞춘 추천", 26f, true))
+        parent.addView(label("한 가지를 골라 가볍게 시작해 보세요.", 24f).apply { setTextColor(muted) })
+        val width = resources.configuration.screenWidthDp
+        val contentWidth = if (width >= 1100) width - (if (width >= 1500) 350 else 320) - 80 else width - 80
+        val columns = when { contentWidth >= 1000 -> 3; contentWidth >= 660 -> 2; else -> 1 }
+        choices.chunked(columns).forEachIndexed { rowIndex, choicesRow ->
+            val cards = row()
+            choicesRow.forEachIndexed { index, choice ->
+                val featured = rowIndex == 0 && index == 0
+                val color = if (featured) palette.onAccent else ink
+                val glyph = activityIcon(choice.activity.kind)
+                val card = column().apply {
+                    setPadding(dp(24), dp(24), dp(24), dp(24))
+                    minimumHeight = dp(324)
+                    background = rounded(if (featured) palette.accent else palette.surface, 26)
+                    val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
+                    heading.addView(icon(glyph, color, 34), LinearLayout.LayoutParams(dp(46), dp(46)))
+                    heading.addView(label("${choice.activity.durationSeconds / 60}분", 24f, true).apply {
+                        setTextColor(color); gravity = Gravity.END
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                    addView(heading)
+                    addView(space(16))
+                    addView(label(choice.activity.title.substringAfter("분 "), 30f, true).apply { setTextColor(color) })
+                    val shortDescription = when (choice.activity.kind) {
+                        ActivityKind.REST -> "화면에서 눈을 떼고\n잠시 편안하게 쉬어요."
+                        ActivityKind.REFLECTION -> "복잡한 생각을 정리하고\n다음 한 걸음을 골라요."
+                        ActivityKind.QUIZ -> "다섯 문제로 가볍게\n머리를 깨워 보세요."
+                    }
+                    addView(label(shortDescription, 24f).apply { setTextColor(if (featured) color else muted) },
+                        LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(4); bottomMargin = dp(20) })
+                    addView(button("시작하기", !featured) { startActivity(choice.activity) }.apply {
+                        withIcon(AppIcon.ARROW_RIGHT, if (!featured) palette.onAccent else ink)
+                        contentDescription = "${choice.activity.title} 시작하기"
+                    })
+                }
+                cards.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(6), dp(8), dp(6), dp(8)) })
             }
-            val lp = if (cards.orientation == LinearLayout.HORIZONTAL) LinearLayout.LayoutParams(0, -2, 1f)
-                else LinearLayout.LayoutParams(-1, -2)
-            lp.setMargins(dp(7), dp(16), dp(7), dp(10)); cards.addView(card, lp)
+            repeat(columns - choicesRow.size) {
+                cards.addView(View(this), LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(6), dp(8), dp(6), dp(8)) })
+            }
+            parent.addView(cards, LinearLayout.LayoutParams(-1, -2))
         }
-        parent.addView(cards)
-        if (choices.isEmpty()) parent.addView(label("남은 시간에는 새 활동보다 마무리를 준비해 주세요.", 28f, true))
-        parent.addView(label("산책·간식 추천은 도보 경로와 휴대폰 복귀 알림을 검증한 뒤 제공할 예정이에요.", 23f))
+        if (choices.isEmpty()) parent.addView(surfaceCard().apply {
+            addView(sectionTitle("이제 마무리할 시간", AppIcon.CLOCK))
+            addView(label("새 활동은 다음 대기시간에 만나세요.", 26f))
+        })
+        parent.addView(space(16))
+        parent.addView(sectionTitle("언제든 멈춰도 괜찮아요", AppIcon.SHIELD))
+        parent.addView(label("활동 뒤에는 마무리할 여유를 남겨둘게요.", 23f).apply { setTextColor(muted) })
     }
 
     private fun startActivity(activity: OwnActivity) {
@@ -430,10 +552,13 @@ class MainActivity : Activity() {
         saveCheckpoint(); render()
     }
 
-    private fun buildActive(parent: LinearLayout, run: Run) {
+    private fun buildActive(container: LinearLayout, run: Run) {
+        val parent = surfaceCard()
+        container.addView(parent)
         val activity = ActivityCatalog.find(run.activityId) ?: return
         parent.addView(label(activity.title, 32f, true))
-        timerLabel = label(clock(remainingActivitySeconds(run)), 54f, true).also { parent.addView(it) }
+        parent.addView(sectionTitle("남은 활동 시간", AppIcon.CLOCK))
+        timerLabel = label(clock(remainingActivitySeconds(run)), 64f, true).also { parent.addView(it) }
         if (activity.kind == ActivityKind.QUIZ && quizIndex < activity.quizQuestions.size) {
             val question = activity.quizQuestions[quizIndex]
             parent.addView(label("${quizIndex + 1} / ${activity.quizQuestions.size}   ${question.prompt}", 28f, true))
@@ -451,7 +576,10 @@ class MainActivity : Activity() {
         parent.addView(button("중단하고 다른 활동 보기") { interruptActivity("활동을 중단했어요. 취향에는 반영하지 않아요."); render() })
     }
 
-    private fun buildFeedback(parent: LinearLayout, run: Run) {
+    private fun buildFeedback(container: LinearLayout, run: Run) {
+        val parent = surfaceCard()
+        parent.addView(sectionTitle("나의 취향", AppIcon.SPARKLES))
+        container.addView(parent)
         parent.addView(label("어떤 시간이었나요?", 32f, true))
         parent.addView(label("내용에 대한 평가만 다음 같은 시간 구간의 추천에 반영해요.", 24f))
         listOf("좋았어요" to ActivityRating.LIKE, "내용이 아쉬웠어요" to ActivityRating.DISLIKE).forEach { (title, rating) ->
@@ -470,45 +598,93 @@ class MainActivity : Activity() {
     }
 
     private fun buildSettings(parent: LinearLayout) {
-        parent.addView(label("나에게 맞는 틈", 38f, true))
-        if (!demoMode && !hasEnergyPermission()) {
-            parent.addView(button("충전 상태 읽기 허용") { requestEnergyPermission() })
+        parent.addView(sectionTitle("설정", AppIcon.SETTINGS))
+        parent.addView(label("나에게 편안한 방식으로.", 40f, true))
+        parent.addView(label("화면과 취향을 이 기기에 맞춰 보세요.", 24f).apply { setTextColor(muted) })
+        parent.addView(space(16))
+        val appearance = surfaceCard()
+        appearance.addView(sectionTitle("화면 모드", AppIcon.SUN))
+        appearance.addView(label("시스템 설정을 따르거나 직접 선택하세요.", 23f).apply { setTextColor(muted) })
+        val modes = if (resources.configuration.screenWidthDp < 650) column() else row()
+        listOf(ThemeMode.SYSTEM to ("자동" to AppIcon.SYSTEM), ThemeMode.LIGHT to ("라이트" to AppIcon.SUN),
+            ThemeMode.DARK to ("다크" to AppIcon.MOON)).forEach { (mode, item) ->
+            val (name, glyph) = item
+            modes.addView(button(name, mode == themeMode) { changeTheme(mode) }.apply {
+                withIcon(glyph, if (mode == themeMode) palette.onAccent else ink)
+                contentDescription = "$name 화면 모드${if (mode == themeMode) ", 선택됨" else ""}"
+                isSelected = mode == themeMode
+            }, if (modes.orientation == LinearLayout.HORIZONTAL) LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+                else LinearLayout.LayoutParams(-1, -2))
         }
-        parent.addView(label("${windowMinutes}분 구간의 직접 선호 · 이 기기에만 저장", 24f))
+        appearance.addView(modes); parent.addView(appearance)
+        val preferences = surfaceCard()
+        preferences.addView(sectionTitle("좋아하는 시간", AppIcon.SPARKLES))
+        preferences.addView(label("${windowMinutes}분 대기할 때 선호하는 활동 · 여러 개 선택 가능", 23f).apply { setTextColor(muted) })
         val profile = loadProfile(bucket())
         ActivityKind.values().forEach { kind ->
             val name = when (kind) { ActivityKind.REST -> "눈 쉬기"; ActivityKind.REFLECTION -> "생각 정리"; ActivityKind.QUIZ -> "가벼운 퀴즈" }
-            parent.addView(button((if (kind in profile.preferredKinds) "✓ " else "") + name, kind in profile.preferredKinds, allowed()) {
+            val selected = kind in profile.preferredKinds
+            preferences.addView(button(if (selected) "$name · 선택됨" else name, selected, allowed()) {
+                if (!allowed()) return@button
                 val kinds = profile.preferredKinds.toMutableSet()
                 if (!kinds.add(kind)) kinds.remove(kind)
                 saveProfile(bucket(), profile.copy(preferredKinds = kinds)); render()
-            })
+            }.apply { withIcon(activityIcon(kind), if (selected) palette.onAccent else ink) })
         }
-        parent.addView(button("자체 활동 취향 학습: ${if (learningOn) "켜짐" else "꺼짐"}", learningOn, allowed()) {
+        preferences.addView(button("취향 기억하기 · ${if (learningOn) "켜짐" else "꺼짐"}", learningOn, allowed()) {
+            if (!allowed()) return@button
             learningOn = !learningOn; prefs.edit().putBoolean("learningOn", learningOn).apply(); render()
-        })
-        parent.addView(button("이 구간 학습 기록 초기화", false, allowed()) {
+        }.apply { withIcon(AppIcon.CHECK, if (learningOn) palette.onAccent else ink) })
+        preferences.addView(label("자체 활동에 남긴 평가만 이 기기에 저장해요.", 22f).apply { setTextColor(muted) })
+        preferences.addView(button("이 시간 구간의 기록 초기화", false, allowed()) {
+            if (!allowed()) return@button
             saveProfile(bucket(), ActivityProfile(preferredKinds = profile.preferredKinds))
             completed = null; message = "이 구간의 학습 기록을 지웠어요."; render()
-        })
-        if (!allowed()) parent.addView(label("선호 변경은 차량·안전 상태가 확인된 뒤 가능해요.", 24f))
+        }.apply { withIcon(AppIcon.RESET) })
+        if (!allowed()) preferences.addView(label("차량 상태를 확인한 뒤 취향을 바꿀 수 있어요.", 23f).apply { setTextColor(muted) })
+        parent.addView(preferences)
+        val connection = surfaceCard()
+        connection.addView(sectionTitle("차량 연결", AppIcon.SHIELD))
+        connection.addView(label(if (demoMode) "시연 중 · 실제 차량 데이터가 아니에요" else statusText(), 24f))
+        if (!demoMode && !hasEnergyPermission()) connection.addView(button("충전 상태 읽기 허용", true) { requestEnergyPermission() })
+        if (!demoMode) connection.addView(button("연결 다시 확인") { reconnectVehicle() }.apply { withIcon(AppIcon.RESET) })
         if (BuildConfig.DEBUG) {
-            parent.addView(label("개발용 시연 설정", 26f, true))
-            if (!demoMode) {
-                parent.addView(button("차량 연결 다시 확인") { reconnectVehicle() })
-                diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).also { parent.addView(it) }
-            }
-            parent.addView(button(if (demoMode) "실제 Pleos 연결로 전환" else "모의 데이터 시연 켜기", demoMode) { switchSource() })
-            if (demoMode) {
-                listOf("충전 중 65%", "목표 도달", "목표 전 충전 중단", "주행 제한", "데이터 지연").forEachIndexed { index, text ->
-                    parent.addView(button(text) {
-                        session = ChargingSession(target); persistTarget()
-                        demoScenario = index
-                        prefs.edit().putInt("demoScenario", index).apply()
-                        emitDemoScenario()
-                    })
+            connection.addView(button(if (developerOptionsExpanded) "개발용 설정 접기" else "개발용 설정 펼치기") {
+                developerOptionsExpanded = !developerOptionsExpanded; render()
+            }.apply { withIcon(AppIcon.SETTINGS) })
+            if (developerOptionsExpanded) {
+                if (!demoMode) diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).apply {
+                    setTextColor(muted)
+                }.also { connection.addView(it) }
+                connection.addView(button(if (demoMode) "실제 Pleos 연결로 전환" else "모의 충전 시연 켜기", demoMode) { switchSource() })
+                if (demoMode) {
+                    listOf("충전 중 65%", "목표 도달", "목표 전 충전 중단", "주행 제한", "데이터 지연").forEachIndexed { index, text ->
+                        connection.addView(button(text, demoScenario == index) {
+                            session = ChargingSession(target); persistTarget()
+                            demoScenario = index; prefs.edit().putInt("demoScenario", index).apply(); emitDemoScenario(); render()
+                        })
+                    }
                 }
             }
+        }
+        parent.addView(connection)
+    }
+
+    private fun changeTheme(mode: ThemeMode) {
+        if (mode == themeMode) return
+        themeMode = mode
+        prefs.edit().putString("themeMode", mode.name).apply()
+        palette = AppTheme.palette(this, mode)
+        render()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun updateSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(if (palette.dark) 0 else mask, mask)
+        } else {
+            window.decorView.systemUiVisibility = if (palette.dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         }
     }
 
@@ -636,28 +812,79 @@ class MainActivity : Activity() {
             isEnabled = allowed()
         }
         val usable = snapshot?.takeIf { System.currentTimeMillis() - it.observedAtMillis in 0..30_000 && it.observedAtMillis >= sourceStartedAt }
-        socLabel?.text = usable?.stateOfCharge?.takeIf { it in 0..100 }?.let { "$it%" } ?: "—"
+        val percent = usable?.stateOfCharge?.takeIf { it in 0..100 }
+        socLabel?.text = percent?.let { "$it%" } ?: "—"
+        chargeGauge?.update(percent, palette)
         statusLabel?.text = statusText()
         diagnosticsLabel?.text = (source as? PleosVehicleDataSource)?.diagnostics.orEmpty()
-        windowLabel?.text = if (windowEndElapsed == 0L) "선택한 시간 ${windowMinutes}분" else "대기시간 ${clock(remainingWindowSeconds())}"
+        windowLabel?.text = if (windowEndElapsed == 0L) "${windowMinutes}분" else clock(remainingWindowSeconds())
         active?.let { run ->
             val left = remainingActivitySeconds(run)
-            timerLabel?.text = if (left == 0) "시간이 되었어요 · 완료를 확인해 주세요" else clock(left)
+            timerLabel?.textSize = if (left == 0) 28f else 64f
+            timerLabel?.text = if (left == 0) "시간이 되었어요. 완료를 확인해 주세요." else clock(left)
         }
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-    private fun rounded(color: Int) = GradientDrawable().apply { setColor(color); cornerRadius = dp(18).toFloat() }
+    private fun rounded(color: Int, radius: Int = 18, border: Int? = null) = GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(radius).toFloat()
+        border?.let { setStroke(dp(1), it) }
+    }
+    private fun space(height: Int) = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(height)) }
+    private fun surfaceCard() = column().apply {
+        setPadding(dp(28), dp(24), dp(28), dp(24))
+        background = rounded(palette.surface, 26, palette.border)
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(8), 0, dp(12)) }
+    }
+    private fun icon(glyph: AppIcon, color: Int = ink, size: Int = 28) = ImageView(this).apply {
+        setImageDrawable(IconDrawable(glyph, color, dp(size)))
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        scaleType = ImageView.ScaleType.CENTER
+    }
+    private fun sectionTitle(text: String, glyph: AppIcon) = row().apply {
+        gravity = Gravity.CENTER_VERTICAL
+        addView(icon(glyph, muted, 24), LinearLayout.LayoutParams(dp(30), dp(34)))
+        addView(label(text, 23f, true).apply { setTextColor(muted); setPadding(dp(8), dp(6), 0, dp(6)) }, LinearLayout.LayoutParams(0, -2, 1f))
+    }
+    private fun badge(text: String, backgroundColor: Int, foreground: Int) = label(text, 21f, true).apply {
+        background = rounded(backgroundColor, 14)
+        setTextColor(foreground); setPadding(dp(14), dp(9), dp(14), dp(9))
+    }
+    private fun activityIcon(kind: ActivityKind) = when (kind) {
+        ActivityKind.REST -> AppIcon.LEAF
+        ActivityKind.REFLECTION -> AppIcon.SPARKLES
+        ActivityKind.QUIZ -> AppIcon.QUIZ
+    }
+    private fun Button.withIcon(glyph: AppIcon, color: Int = ink) {
+        setCompoundDrawablesRelativeWithIntrinsicBounds(IconDrawable(glyph, color, dp(26)), null, null, null)
+        compoundDrawablePadding = dp(10)
+    }
+    private fun iconButton(description: String, glyph: AppIcon, action: () -> Unit) = button("", action = action).apply {
+        contentDescription = description; tooltipText = description
+        setPadding(dp(18), dp(18), dp(18), dp(18))
+        setCompoundDrawablesRelativeWithIntrinsicBounds(IconDrawable(glyph, ink, dp(28)), null, null, null)
+    }
     private fun label(value: String, size: Float = 24f, bold: Boolean = false) = TextView(this).apply {
-        text = value; textSize = size; setTextColor(ink); setPadding(0, dp(8), 0, dp(8))
-        if (bold) setTypeface(typeface, Typeface.BOLD)
+        text = value; textSize = size; setTextColor(ink); includeFontPadding = false
+        setPadding(0, dp(7), 0, dp(7)); setLineSpacing(dp(3).toFloat(), 1f)
+        typeface = Typeface.create(if (bold) "sans-serif-medium" else "sans-serif", Typeface.NORMAL)
     }
     private fun button(value: String, selected: Boolean = false, enabled: Boolean = true, action: () -> Unit) = Button(this).apply {
-        text = value; textSize = 24f; isAllCaps = false; minHeight = dp(64); isEnabled = enabled
-        setTextColor(ink); background = rounded(if (selected) mint else Color.WHITE)
-        setPadding(dp(14), dp(12), dp(14), dp(12))
+        text = value; textSize = 24f; isAllCaps = false; minHeight = dp(64); minimumWidth = 0; minWidth = 0; isEnabled = enabled
+        includeFontPadding = false; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setTextColor(ColorStateList(arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
+            intArrayOf(muted, if (selected) palette.onAccent else ink)))
+        backgroundTintList = null
+        val states = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(-android.R.attr.state_enabled), rounded(palette.surfaceAlt, 16, palette.border))
+            addState(intArrayOf(android.R.attr.state_focused), rounded(if (selected) mint else palette.surfaceAlt, 16, ink).apply { setStroke(dp(3), ink) })
+            addState(intArrayOf(), rounded(if (selected) mint else palette.surfaceAlt, 16, if (selected) mint else palette.border))
+        }
+        background = RippleDrawable(ColorStateList.valueOf(if (palette.dark) 0x26FFFFFF else 0x16000000), states, null)
+        stateListAnimator = null; elevation = 0f
+        setPadding(dp(16), dp(12), dp(16), dp(12))
         setOnClickListener { action() }
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(6), 0, dp(6)) }
     }

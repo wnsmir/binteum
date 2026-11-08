@@ -51,6 +51,7 @@ JDK와 Android SDK 환경변수가 이미 설정되어 있다면 `./gradlew`를 
 - [추천과 개인화 설계](docs/recommendation-design.md): 시간·안전 필터, 직접 선호와 자체 평가, 이후 밴딧 실험
 - [공식 차량 API 전체 목록](docs/vehicle-api-matrix.md): 19개 영역·배포물 확인 440개, 권한과 연결 여부
 - [웹 미디어 구현](docs/web-media-integration.md): YouTube 공식 IFrame, 자체 웹 콘텐츠, 오류와 중단 처리
+- [UI 고도화](docs/ui-refinement.md): 자동·라이트·다크 모드, 공통 아이콘, 충전 게이지, 반응형 화면
 
 ## 함께 개발하기
 
