@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="__LANG__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com; style-src 'unsafe-inline'; frame-src https://www.youtube.com; connect-src https://www.youtube.com; img-src https: data:; base-uri 'none'; form-action 'none'">
+  <title>YouTube</title>
+  <style>
+    :root {
+      color-scheme: __COLOR_SCHEME__;
+      --app-bg: #fff; --app-surface: #eeeee6; --app-text: #20241e;
+      --app-muted: #606659; --app-accent: #c9f58f; --app-on-accent: #15200f;
+      --app-border: #dddfd4; __THEME_VARS__
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; background: var(--app-bg); color: var(--app-text); font: 24px/1.4 sans-serif; }
+    #player { width: 100%; height: calc(100vh - 112px); min-height: 220px; background: #111; }
+    iframe { display: block; width: 100%; border: 0; }
+    footer { display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; padding: 16px 20px; }
+    p { margin: 0; color: var(--app-muted); }
+    a { color: var(--app-text); min-height: 64px; display: inline-flex; align-items: center; text-underline-offset: 6px; }
+    a:focus-visible { outline: 3px solid var(--app-accent); outline-offset: 5px; }
+  </style>
+</head>
+<body>
+  <div id="player" aria-label="Official YouTube player"></div>
+  <footer>
+    <p id="message" role="status">Connecting to player</p>
+    <a href="https://www.youtube.com/watch?v=__VIDEO_ID__">Open on YouTube ↗</a>
+  </footer>
+  <script>
+    'use strict';
+    // Native host supplies only a verified catalog video ID. No viewing-history storage.
+    let player;
+    let ready = false;
+    let pendingVideo = null;
+    window.binteumPlayVideo = function (id) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
+      document.querySelector('footer a').href = 'https://www.youtube.com/watch?v=' + id;
+      if (ready && player && player.loadVideoById) player.loadVideoById(id);
+      else pendingVideo = id;
+    };
+    window.binteumStatus = {state: 'loading'};
+    function report(state, code, message) {
+      window.binteumStatus = {state: state, code: code || ''};
+      if (message) document.getElementById('message').textContent = message;
+    }
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('player', {
+        width: '100%', height: '240', videoId: '__VIDEO_ID__',
+        playerVars: {hl: "__LANG__", autoplay: 0, controls: 1, fs: 0, origin: '__APP_ORIGIN__'},
+        events: {
+          onReady: function () {
+            ready = true;
+            report('ready', '', 'Press play.');
+            if (pendingVideo) { const id = pendingVideo; pendingVideo = null; player.loadVideoById(id); }
+          },
+          onStateChange: function (event) {
+            const states = {'-1': 'ready', '0': 'ended', '1': 'playing', '2': 'paused', '3': 'buffering', '5': 'ready'};
+            const labels = {'-1': 'Press play.', '0': 'Video ended.', '1': 'Playing on YouTube', '2': 'Paused', '3': 'Loading', '5': 'Press play.'};
+            report(states[event.data] || 'loading', '', labels[event.data]);
+          },
+          onError: function (event) {
+            ready = true;
+            report('error', String(event.data), 'Could not play on this device. Tap Reopen.');
+          },
+          onAutoplayBlocked: function () {
+            report('autoplay_blocked', '', 'Press play in the player.');
+          }
+        }
+      });
+    };
+    const script = document.createElement('script');
+    script.src = 'https://www.youtube.com/iframe_api';
+    script.onerror = function () { report('error', 'script', 'Could not connect to YouTube.'); };
+    document.head.appendChild(script);
+    setTimeout(function () {
+      if (!ready) report('error', 'timeout', 'Connection delayed. Tap Reopen.');
+    }, 20000);
+    // Native lifecycle destruction is the safety boundary. This is only an
+    // additional browser visibility safeguard; it never auto-resumes playback.
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && player && player.pauseVideo) player.pauseVideo();
+    });
+  </script>
+</body>
+</html>

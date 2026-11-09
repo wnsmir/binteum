@@ -49,7 +49,7 @@ class ChargeGaugeView(context: Context) : View(context) {
         paint.color = palette.border
         canvas.drawArc(arcBounds, 135f, 270f, false, paint)
         percent?.takeIf { it > 0 }?.let {
-            paint.color = if (palette.dark) palette.accent else palette.onAccent
+            paint.color = palette.textMuted
             canvas.drawArc(arcBounds, 135f, 270f * it / 100, false, paint)
         }
     }

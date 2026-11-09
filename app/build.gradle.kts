@@ -8,12 +8,15 @@ android {
     buildToolsVersion = "36.1.0"
     useLibrary("android.car")
     buildFeatures { buildConfig = true }
+    // Keep both languages available for offline in-app language switching.
+    bundle { language { enableSplit = false } }
     defaultConfig {
         applicationId = "com.binteum.app"
         minSdk = 28
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "com.binteum.app.TtsSdkProbe"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
@@ -23,5 +26,6 @@ android {
 kotlin { jvmToolchain(21) }
 dependencies {
     implementation(project(":core"))
+    implementation("ai.pleos.playground:TextToSpeech:3.3.1")
     implementation("ai.pleos.playground:Vehicle:2.3.2")
 }

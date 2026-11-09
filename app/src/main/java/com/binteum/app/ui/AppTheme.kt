@@ -3,6 +3,7 @@ package com.binteum.app.ui
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
+import com.binteum.core.BackgroundMode
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
@@ -18,40 +19,49 @@ data class AppPalette(
     val border: Int,
     val warning: Int,
     val warningSurface: Int,
+    val flat: Boolean = false,
 )
 
 object AppTheme {
-    // Muted text on the darkest light surface has a calculated ratio of 4.71:1.
-    // Accent is a filled-surface color; use onAccent for text/icons on it.
     private val light = AppPalette(
         dark = false,
-        background = Color.rgb(245, 246, 240),
-        surface = Color.WHITE,
-        surfaceAlt = Color.rgb(236, 239, 230),
-        text = Color.rgb(32, 40, 32),
-        textMuted = Color.rgb(94, 109, 97),
-        accent = Color.rgb(201, 245, 143),
-        onAccent = Color.rgb(21, 32, 15),
-        border = Color.rgb(216, 224, 210),
-        warning = Color.rgb(141, 74, 23),
-        warningSurface = Color.rgb(255, 240, 220),
+        background = Color.rgb(243, 240, 248),
+        surface = Color.argb(112, 0, 0, 0),
+        surfaceAlt = Color.argb(80, 0, 0, 0),
+        text = Color.rgb(248, 245, 255),
+        textMuted = Color.rgb(218, 214, 226),
+        accent = Color.argb(160, 0, 0, 0),
+        onAccent = Color.rgb(248, 248, 250),
+        border = Color.argb(38, 255, 255, 255),
+        warning = Color.rgb(255, 205, 156),
+        warningSurface = Color.argb(112, 0, 0, 0),
     )
 
     private val dark = AppPalette(
         dark = true,
-        background = Color.rgb(16, 20, 17),
-        surface = Color.rgb(26, 32, 28),
-        surfaceAlt = Color.rgb(21, 26, 22),
-        text = Color.rgb(241, 244, 237),
-        textMuted = Color.rgb(163, 177, 167),
-        accent = Color.rgb(201, 245, 143),
-        onAccent = Color.rgb(21, 32, 15),
-        border = Color.rgb(52, 67, 56),
-        warning = Color.rgb(255, 195, 134),
-        warningSurface = Color.rgb(51, 40, 27),
+        background = Color.rgb(31, 37, 52),
+        surface = Color.argb(112, 0, 0, 0),
+        surfaceAlt = Color.argb(80, 0, 0, 0),
+        text = Color.rgb(248, 245, 255),
+        textMuted = Color.rgb(197, 189, 211),
+        accent = Color.argb(160, 0, 0, 0),
+        onAccent = Color.rgb(248, 248, 250),
+        border = Color.argb(38, 255, 255, 255),
+        warning = Color.rgb(255, 205, 156),
+        warningSurface = Color.argb(112, 0, 0, 0),
     )
 
-    fun palette(context: Context, mode: ThemeMode): AppPalette {
+    private val black = dark.copy(background = Color.BLACK, surface = 0xFF141414.toInt(),
+        surfaceAlt = 0xFF242424.toInt(), text = 0xFFF5F5F5.toInt(), textMuted = 0xFFB8B8B8.toInt(),
+        accent = 0xFF343434.toInt(), border = 0xFF4A4A4A.toInt(), flat = true)
+    private val white = light.copy(background = Color.WHITE, surface = 0xFFF4F4F4.toInt(),
+        surfaceAlt = 0xFFE7E7E7.toInt(), text = 0xFF171717.toInt(), textMuted = 0xFF555555.toInt(),
+        accent = 0xFF262626.toInt(), onAccent = Color.WHITE, border = 0xFFB8B8B8.toInt(),
+        warning = 0xFF8A4700.toInt(), warningSurface = 0xFFFFE9CD.toInt(), flat = true)
+
+    fun palette(context: Context, mode: ThemeMode, backgroundMode: BackgroundMode = BackgroundMode.AUTO): AppPalette {
+        if (backgroundMode == BackgroundMode.BLACK) return black
+        if (backgroundMode == BackgroundMode.WHITE) return white
         val useDark = when (mode) {
             ThemeMode.DARK -> true
             ThemeMode.LIGHT -> false

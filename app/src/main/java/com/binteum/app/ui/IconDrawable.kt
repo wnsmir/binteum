@@ -50,12 +50,18 @@ class IconDrawable(private val icon: AppIcon, color: Int, private val sizePx: In
             }
             AppIcon.PLAY -> path { moveTo(8f, 4f); lineTo(20f, 12f); lineTo(8f, 20f); close() }
             AppIcon.SETTINGS -> {
-                line(3f, 6f, 8f, 6f); line(12f, 6f, 21f, 6f)
-                line(3f, 12f, 14f, 12f); line(18f, 12f, 21f, 12f)
-                line(3f, 18f, 6f, 18f); line(10f, 18f, 21f, 18f)
-                canvas.drawCircle(10f, 6f, 2f, paint)
-                canvas.drawCircle(16f, 12f, 2f, paint)
-                canvas.drawCircle(8f, 18f, 2f, paint)
+                // Eight teeth and a central hub, recognizable as a settings cog.
+                path {
+                    for (i in 0 until 32) {
+                        val angle = i * Math.PI / 16 - Math.PI / 2
+                        val radius = if (i % 4 in 1..2) 10f else 8f
+                        val x = 12f + (kotlin.math.cos(angle) * radius).toFloat()
+                        val y = 12f + (kotlin.math.sin(angle) * radius).toFloat()
+                        if (i == 0) moveTo(x, y) else lineTo(x, y)
+                    }
+                    close()
+                }
+                canvas.drawCircle(12f, 12f, 3.2f, paint)
             }
             AppIcon.SUN -> {
                 canvas.drawCircle(12f, 12f, 4.2f, paint)

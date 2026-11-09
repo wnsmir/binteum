@@ -30,10 +30,11 @@ import com.binteum.core.VehicleSnapshot
  * signal or a promise of monitoring while the driver is away. No vehicle control APIs are used.
  */
 class PleosVehicleDataSource(context: Context) : VehicleDataSource {
+    private val localizedContext = context.applicationContext.createConfigurationContext(context.resources.configuration)
     override val isSimulation = false
 
     @Volatile
-    var diagnostics: String = "Pleos 연결 대기"
+    var diagnostics: String = localizedContext.getString(com.binteum.app.R.string.diagnostic_00)
         private set
 
     /** Requested start/stop setting; never treated as proof that the battery is charging. */
@@ -46,7 +47,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
     var chargeStateChangedAtMillis: Long? = null
         private set
 
-    private val context = context.applicationContext
+    private val context = localizedContext
     private val handler = Handler(Looper.getMainLooper())
     private val powerManager = this.context.getSystemService(PowerManager::class.java)
     private var listener: ((VehicleSnapshot) -> Unit)? = null
@@ -65,10 +66,10 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
     private var charging: Boolean? = null
     private var uxRestricted: Boolean? = null
     private var observedAtMillis = 0L
-    private var batteryStatus = "차량 데이터 미확인"
-    private var switchStatus = "충전 요청 스위치 미확인"
-    private var uxStatus = "AAOS UX 상태 미확인"
-    private var chargeStatus = "실제 충전 상태 미확인"
+    private var batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_01)
+    private var switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
+    private var uxStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_03)
+    private var chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_04)
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -89,8 +90,8 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         active = true
         listener = onSnapshot
         val session = generation
-        batteryStatus = "Pleos 권한·지원 기능 확인 중"
-        uxStatus = "AAOS UX 상태 미확인"
+        batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_05)
+        uxStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_03)
         publish()
 
         try {
@@ -104,9 +105,9 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 }
             }.also { it.start() }
         } catch (_: LinkageError) {
-            uxStatus = "이 기기에 AAOS 차량 라이브러리 없음"
+            uxStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_06)
         } catch (_: Exception) {
-            uxStatus = "AAOS UX 서비스 초기화 실패"
+            uxStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_07)
         }
         try {
             val filter = IntentFilter().apply {
@@ -124,7 +125,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             // isInteractive is checked at every publish and before each read as well.
         }
         if (context.checkSelfPermission(PleosPermission.CAR_ENERGY) != PackageManager.PERMISSION_GRANTED) {
-            batteryStatus = "CAR_ENERGY 권한 없음 · SOC/충전 상태 미확인"
+            batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_08)
             publish()
             return@onMain
         }
@@ -133,7 +134,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             battery = vehicle?.getEvBattery()
             checkCapabilities(session)
         } catch (_: Exception) {
-            batteryStatus = "Pleos 차량 서비스 초기화 실패"
+            batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_09)
             publish()
         }
     }
@@ -146,7 +147,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             if (active && generation == session && !finished) {
                 finished = true
                 pollingHalted = true
-                batteryStatus = "Pleos 지원 확인 시간 초과 · 화면을 다시 열어 재연결"
+                batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_10)
                 publish()
             }
         }
@@ -154,7 +155,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             if (!active || generation != session || finished) return@onMain
             val readable = access == AccessType.READ || access == AccessType.READ_WRITE
             if (isSoc) socReadable = readable else chargeReadable = readable
-            if (failed) batteryStatus = "Pleos 지원 확인 실패 · 해당 값 미확인"
+            if (failed) batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_11)
             remaining -= 1
             if (remaining == 0) {
                 finished = true
@@ -212,9 +213,9 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 chargeSwitchEnabled = null
                 chargeStateChangedAtMillis = null
                 observedAtMillis = 0L
-                batteryStatus = "차량 읽기 시간 초과 · 화면을 다시 열어 재연결"
-                switchStatus = "충전 요청 스위치 미확인"
-                chargeStatus = "실제 충전 상태 미확인 · 응답 시간 초과"
+                batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_12)
+                switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
+                chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_13)
                 publish()
             }
         }
@@ -236,14 +237,14 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 chargeStateChangedAtMillis = chargeChangedAt.takeIf { awake && it > 0L }
                 observedAtMillis = if (awake) startedAt else 0L
                 batteryStatus = when {
-                    socFailed -> "Pleos SOC 읽기 실패"
-                    soc == null -> "Pleos SOC 미지원/미확인"
-                    else -> "Pleos SOC 수신 · 원본 측정시각 미제공"
+                    socFailed -> localizedContext.getString(com.binteum.app.R.string.diagnostic_14)
+                    soc == null -> localizedContext.getString(com.binteum.app.R.string.diagnostic_15)
+                    else -> localizedContext.getString(com.binteum.app.R.string.diagnostic_16)
                 }
                 switchStatus = when {
-                    switchFailed -> "충전 요청 스위치 읽기 실패"
-                    switch == null -> "충전 요청 스위치 미지원/미확인"
-                    else -> "충전 요청 스위치: $switch · 실제 충전 상태와 별도"
+                    switchFailed -> localizedContext.getString(com.binteum.app.R.string.diagnostic_17)
+                    switch == null -> localizedContext.getString(com.binteum.app.R.string.diagnostic_18)
+                    else -> localizedContext.getString(com.binteum.app.R.string.charge_switch_detail, switch.toString())
                 }
                 publish()
                 handler.postDelayed({ poll(session) }, POLL_INTERVAL_MS)
@@ -270,7 +271,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         }
         val reader = uxReader
         if (reader == null) {
-            chargeStatus = "AAOS 실제 충전 상태 조회 불가"
+            chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_19)
             complete(2, null, null, false)
         } else {
             try {
@@ -282,7 +283,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                     complete(2, null, null, false)
                 }
             } catch (_: Exception) {
-                chargeStatus = "AAOS 실제 충전 상태 조회 실패"
+                chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_20)
                 complete(2, null, null, true)
             }
         }
@@ -317,11 +318,11 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         charging = null
         chargeSwitchEnabled = null
         chargeStateChangedAtMillis = null
-        switchStatus = "충전 요청 스위치 미확인"
-        chargeStatus = "실제 충전 상태 미확인"
+        switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
+        chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_04)
         uxRestricted = null
         observedAtMillis = 0L
-        diagnostics = "Pleos 연결 중지"
+        diagnostics = localizedContext.getString(com.binteum.app.R.string.diagnostic_21)
     }
 
     private fun onMain(block: () -> Unit) {

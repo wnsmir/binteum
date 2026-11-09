@@ -28,11 +28,11 @@
 </head>
 <body>
   <main>
-    <h1>잠시, 눈을 쉬게 해 주세요</h1>
-    <p>화면을 내려놓고 편안한 자세로 쉬어 보세요.</p>
+    <h1>60초 눈 휴식</h1>
+    <p>60초 동안 화면에서 시선을 떼세요.</p>
     <div id="time" aria-label="남은 휴식 시간">1:00</div>
     <div class="track" aria-hidden="true"><span id="progress"></span></div>
-    <p id="message" role="status">준비되면 시작해 주세요.</p>
+    <p id="message" role="status">시작 대기</p>
     <div class="actions">
       <button id="start" type="button">휴식 시작</button>
       <button id="stop" type="button">멈추기</button>
@@ -57,14 +57,14 @@
       if (seconds === 0) {
         clearInterval(interval); interval = null;
         window.binteumStatus = {state: 'rest_complete'};
-        message.textContent = '60초가 지났어요. 편안하게 마무리해 주세요.';
+        message.textContent = '휴식 완료';
       }
     }
     document.getElementById('start').addEventListener('click', function () {
       clearInterval(interval);
       endAt = performance.now() + 60000;
       window.binteumStatus = {state: 'rest_running'};
-      message.textContent = '화면을 계속 보고 있지 않아도 괜찮아요.';
+      message.textContent = '휴식 진행 중';
       tick(); interval = setInterval(tick, 250);
     });
     document.getElementById('stop').addEventListener('click', stop);

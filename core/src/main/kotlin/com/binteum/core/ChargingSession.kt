@@ -21,7 +21,7 @@ data class SessionCheckpoint(val targetPercent: Int, val targetReached: Boolean,
 
 /** No vehicle controls. The target is an app reminder, not a charging limit. */
 class ChargingSession(val targetPercent: Int, private val maxDataAgeMillis: Long = 30_000,
-                      checkpoint: SessionCheckpoint? = null) {
+                      checkpoint: SessionCheckpoint? = null, private val targetEnabled: Boolean = true) {
     private var targetNotificationDelivered = checkpoint?.notificationDelivered ?: false
     private var targetReached = checkpoint?.targetReached ?: false
 
@@ -42,7 +42,7 @@ class ChargingSession(val targetPercent: Int, private val maxDataAgeMillis: Long
             snapshot.uxRestricted == null || age !in 0..maxDataAgeMillis ||
                 snapshot.stateOfCharge == null || snapshot.stateOfCharge !in 0..100 ||
                 snapshot.charging == null -> SessionStatus.WAITING_FOR_DATA
-            targetReached || snapshot.stateOfCharge >= targetPercent -> SessionStatus.TARGET_REACHED
+            targetEnabled && (targetReached || snapshot.stateOfCharge >= targetPercent) -> SessionStatus.TARGET_REACHED
             !snapshot.charging -> SessionStatus.INTERRUPTED
             else -> SessionStatus.CHARGING
         }

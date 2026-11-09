@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="ko">
+<html lang="__LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com; style-src 'unsafe-inline'; frame-src https://www.youtube.com; connect-src https://www.youtube.com; img-src https: data:; base-uri 'none'; form-action 'none'">
-  <title>YouTube 공식 예제</title>
+  <title>YouTube</title>
   <style>
     :root {
       color-scheme: __COLOR_SCHEME__;
@@ -27,14 +27,20 @@
   <div id="player" aria-label="YouTube 공식 동영상 플레이어"></div>
   <footer>
     <p id="message" role="status">플레이어 연결 중</p>
-    <a href="https://www.youtube.com/watch?v=M7lc1UVf-VE">YouTube에서 열기 ↗</a>
+    <a href="https://www.youtube.com/watch?v=__VIDEO_ID__">YouTube에서 열기 ↗</a>
   </footer>
   <script>
     'use strict';
-    // ID is the sample in Google's IFrame API Getting started documentation.
-    // No invented title, runtime, API key, viewing history or native JS bridge.
+    // Native host supplies only a verified catalog video ID. No viewing-history storage.
     let player;
     let ready = false;
+    let pendingVideo = null;
+    window.binteumPlayVideo = function (id) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
+      document.querySelector('footer a').href = 'https://www.youtube.com/watch?v=' + id;
+      if (ready && player && player.loadVideoById) player.loadVideoById(id);
+      else pendingVideo = id;
+    };
     window.binteumStatus = {state: 'loading'};
     function report(state, code, message) {
       window.binteumStatus = {state: state, code: code || ''};
@@ -42,12 +48,13 @@
     }
     window.onYouTubeIframeAPIReady = function () {
       player = new YT.Player('player', {
-        width: '100%', height: '240', videoId: 'M7lc1UVf-VE',
-        playerVars: {autoplay: 0, controls: 1, fs: 0, origin: '__APP_ORIGIN__'},
+        width: '100%', height: '240', videoId: '__VIDEO_ID__',
+        playerVars: {hl: "__LANG__", autoplay: 0, controls: 1, fs: 0, origin: '__APP_ORIGIN__'},
         events: {
           onReady: function () {
             ready = true;
-            report('ready', '', '재생 버튼을 누르면 YouTube가 재생을 시도합니다.');
+            report('ready', '', '재생 버튼을 눌러 주세요.');
+            if (pendingVideo) { const id = pendingVideo; pendingVideo = null; player.loadVideoById(id); }
           },
           onStateChange: function (event) {
             const states = {'-1': 'ready', '0': 'ended', '1': 'playing', '2': 'paused', '3': 'buffering', '5': 'ready'};
@@ -56,7 +63,7 @@
           },
           onError: function (event) {
             ready = true;
-            report('error', String(event.data), '이 환경에서 재생하지 못했어요. 위에서 다시 열거나 웹 휴식을 선택해 주세요.');
+            report('error', String(event.data), '이 환경에서 재생하지 못했어요. 다시 열기를 눌러 주세요.');
           },
           onAutoplayBlocked: function () {
             report('autoplay_blocked', '', '플레이어의 재생 버튼을 직접 눌러 주세요.');
@@ -69,7 +76,7 @@
     script.onerror = function () { report('error', 'script', 'YouTube에 연결하지 못했어요.'); };
     document.head.appendChild(script);
     setTimeout(function () {
-      if (!ready) report('error', 'timeout', '연결이 지연되고 있어요. 다시 열거나 웹 휴식을 선택해 주세요.');
+      if (!ready) report('error', 'timeout', '연결이 지연되고 있어요. 다시 열기를 눌러 주세요.');
     }, 20000);
     // Native lifecycle destruction is the safety boundary. This is only an
     // additional browser visibility safeguard; it never auto-resumes playback.

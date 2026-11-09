@@ -35,15 +35,17 @@ import com.binteum.app.ui.AppPalette
 import com.binteum.app.ui.AppTheme
 import com.binteum.app.ui.IconDrawable
 import com.binteum.app.ui.ThemeMode
+import com.binteum.core.VideoCatalog
+import com.binteum.core.VideoSample
 
 /**
  * An inline, parked-only web surface. The host owns fresh vehicle/UX state.
- * Nothing is loaded until an allowed user taps a button. No Android JS interface
+ * The selected recommendation is preloaded after explicit reminder confirmation; only card/player taps request playback. No Android JS interface
  * or vehicle information is exposed to the page. A hidden/blocked surface is
  * destroyed, not merely covered or left playing in the background.
  */
 class WebMediaPanel(context: Context) : LinearLayout(context) {
-    /** Host rechecks current safety/time and starts its fixed window before any content loads. */
+    /** Host rechecks current safety and the explicitly started reminder before content loads or plays. */
     var onContentOpen: (() -> Boolean)? = null
     private enum class Page(val asset: String) {
         YOUTUBE("media/youtube.html"), REST("media/rest.html")
@@ -57,6 +59,12 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private val currentTitle = TextView(context)
     private val frame = FrameLayout(context)
     private val launcherRow = LinearLayout(context)
+    private val recommendationHeading = TextView(context)
+    private val videoChoices = LinearLayout(context).apply { orientation = VERTICAL }
+    private var candidates = VideoCatalog.all
+    private var selectedVideo: VideoSample = VideoCatalog.all.first()
+    private var recommendationKey = ""
+    private var preloadAttempted = false
     private val launchButtons = mutableListOf<Button>()
     private val launchers = mutableListOf<Launcher>()
     private val primaryText = mutableListOf<TextView>()
@@ -67,6 +75,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private lateinit var closeButton: Button
     private var palette = AppTheme.palette(context, ThemeMode.SYSTEM)
     private var webView: WebView? = null
+    val hasOpenContent: Boolean get() = webView != null
     private var selectedPage: Page? = null
     private var playbackAllowed = false
     private var released = false
@@ -74,14 +83,23 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private var pollingGeneration = -1
     private var lastWebState = ""
     private var hostReparentDepth = 0
+    private var playWhenReady = false
+    private val thumbnailExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val thumbnails = mutableMapOf<String, android.graphics.Bitmap>()
+    private val thumbnailWaiters = mutableMapOf<String, MutableList<ImageView>>()
+    private val videoCards = mutableMapOf<String, LinearLayout>()
 
     init {
         orientation = VERTICAL
         setPadding(0, dp(4), 0, 0)
+        recommendationHeading.textSize = 28f
+        recommendationHeading.setTypeface(null, Typeface.BOLD)
+        recommendationHeading.setPadding(0, dp(12), 0, dp(12))
+        primaryText += recommendationHeading
+        addView(recommendationHeading)
+        addView(videoChoices, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         launcherRow.orientation = VERTICAL
         addView(launcherRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        addLauncher(Page.YOUTUBE, AppIcon.PLAY, "공식 예제 영상", "YouTube · 광고와 로딩 시간이 추가될 수 있어요.", "영상 열기")
-        addLauncher(Page.REST, AppIcon.LEAF, "60초 눈 휴식", "화면에서 눈을 떼고 잠시 쉬어요. 인터넷 없이 이용할 수 있어요.", "휴식 열기")
 
         currentTitle.textSize = 26f
         currentTitle.setTypeface(null, Typeface.BOLD)
@@ -89,13 +107,13 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         primaryText += currentTitle
         addView(currentTitle)
         val actions = LinearLayout(context).apply { orientation = HORIZONTAL }
-        reopenButton = actionButton("다시 열기", AppIcon.RESET, false) {
-            selectedPage?.let(::open) ?: setStatus("먼저 콘텐츠를 선택해 주세요.")
+        reopenButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_129), AppIcon.RESET, false) {
+            selectedPage?.let(::open) ?: setStatus(context.getString(com.binteum.app.R.string.ui_text_130))
         }
         launchButtons += reopenButton
-        closeButton = actionButton("닫기", AppIcon.CLOSE, false) {
+        closeButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_053), AppIcon.CLOSE, false) {
             destroySurface()
-            setStatus("콘텐츠를 닫았어요. 다시 열려면 직접 선택해 주세요.")
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_131))
         }
         actions.addView(reopenButton, actionLayout())
         actions.addView(closeButton, actionLayout())
@@ -108,7 +126,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         addView(frame, LayoutParams(LayoutParams.MATCH_PARENT, dp(440)))
         frame.visibility = View.GONE
         applyPalette(palette)
-        setPlaybackAllowed(false, "차량의 정차·안전 상태를 확인하면 열 수 있어요.")
+        setPlaybackAllowed(false, context.getString(com.binteum.app.R.string.ui_text_132))
     }
 
     /** Recolors our surfaces only. Does not reload, resume, or touch YouTube's iframe UI. */
@@ -127,6 +145,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             item.view.backgroundTintList = ColorStateList.valueOf(if (item.primary) palette.accent else palette.surfaceAlt)
             item.view.setCompoundDrawablesRelativeWithIntrinsicBounds(IconDrawable(item.icon, foreground, dp(26)), null, null, null)
         }
+        recommendationKey = "" // Recolor choice rows on the next host update, never reload the player.
         refreshPresentation()
         webView?.let { view ->
             view.setBackgroundColor(palette.surface)
@@ -150,7 +169,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     }
 
     /** Must be called on the UI thread. true never resumes or loads media. */
-    fun setPlaybackAllowed(allowed: Boolean, reason: String = "지금은 웹 콘텐츠를 사용할 수 없어요.") {
+    fun setPlaybackAllowed(allowed: Boolean, reason: String = context.getString(com.binteum.app.R.string.ui_text_133)) {
         if (released) return
         val wasAllowed = playbackAllowed
         playbackAllowed = allowed
@@ -159,13 +178,140 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             destroySurface()
             setStatus(reason)
         } else if (!wasAllowed) {
-            setStatus("콘텐츠를 선택해 주세요. 영상은 플레이어에서 재생 버튼을 눌러 시작해요.")
+            recommendationKey = ""
+            preloadAttempted = false
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_134))
+        }
+        maybePreload()
+    }
+
+    fun updateRecommendations(remainingSeconds: Int?) {
+        candidates = VideoCatalog.recommend(remainingSeconds)
+        recommendationHeading.text = if (remainingSeconds == null) context.getString(com.binteum.app.R.string.ui_text_135)
+            else context.getString(com.binteum.app.R.string.video_recommendation_heading,
+                remainingSeconds.coerceAtLeast(0) / 60, remainingSeconds.coerceAtLeast(0) % 60, candidates.size)
+        val key = "${remainingSeconds == null}/" + candidates.joinToString { it.id }
+        if (key != recommendationKey) {
+            recommendationKey = key
+            videoChoices.removeAllViews()
+            videoCards.clear()
+            candidates.forEach { sample -> videoChoices.addView(videoCard(sample)) }
+            videoChoices.addView(TextView(context).apply {
+                text = if (remainingSeconds == null) context.getString(com.binteum.app.R.string.ui_text_136) else context.getString(com.binteum.app.R.string.ui_text_137); textSize = 20f; setTextColor(palette.textMuted)
+                setPadding(0, dp(6), 0, dp(12))
+            })
+        }
+        maybePreload()
+    }
+
+    private fun videoCard(sample: VideoSample): LinearLayout {
+        val card = LinearLayout(context).apply {
+            orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(12), dp(20), dp(12))
+            background = rounded(palette.surface, dp(22), palette.border)
+            layoutParams = LayoutParams(-1, -2).apply { bottomMargin = dp(12) }
+            isClickable = true; isFocusable = true
+            contentDescription = context.getString(com.binteum.app.R.string.video_card_description,
+                sample.title, sample.seconds / 60, sample.seconds % 60)
+            foreground = android.graphics.drawable.RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null,
+                rounded(Color.WHITE, dp(22)))
+            setOnClickListener { playVideo(sample) }
+        }
+        val preview = FrameLayout(context).apply {
+            background = rounded(0xFF15191F.toInt(), dp(14)); clipToOutline = true
+        }
+        val image = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setImageDrawable(IconDrawable(AppIcon.PLAY, palette.textMuted, dp(36)))
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        preview.addView(image, FrameLayout.LayoutParams(-1, -1))
+        val duration = TextView(context).apply {
+            text = context.getString(com.binteum.app.R.string.video_duration, sample.seconds / 60, sample.seconds % 60)
+            textSize = 18f; setTextColor(Color.WHITE)
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            background = rounded(0xDD000000.toInt(), dp(6))
+        }
+        preview.addView(duration, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(dp(6), dp(6), dp(6), dp(6))
+        })
+        // Compact enough for the content column in split-screen, while retaining a 16:9 preview.
+        val previewWidth = if (resources.configuration.screenWidthDp < 650) 140 else 224
+        card.addView(preview, LayoutParams(dp(previewWidth), dp(previewWidth * 9 / 16)))
+        val text = LinearLayout(context).apply {
+            orientation = VERTICAL; setPadding(dp(20), 0, 0, 0)
+            addView(TextView(context).apply {
+                this.text = sample.title; textSize = 25f; setTextColor(palette.text)
+                setTypeface(null, Typeface.BOLD)
+            })
+            addView(TextView(context).apply {
+                this.text = sample.author; textSize = 20f; setTextColor(palette.textMuted)
+                setPadding(0, dp(8), 0, dp(8))
+            })
+            addView(TextView(context).apply {
+                this.text = context.getString(com.binteum.app.R.string.ui_text_138); textSize = 20f; setTextColor(palette.textMuted)
+            })
+        }
+        card.addView(text, LayoutParams(0, -2, 1f))
+        videoCards[sample.id] = card
+        loadThumbnail(sample.id, image)
+        return card
+    }
+
+    private fun loadThumbnail(id: String, image: ImageView) {
+        if (!playbackAllowed || released) return
+        thumbnails[id]?.let { image.setImageBitmap(it); return }
+        val waiting = thumbnailWaiters[id]
+        if (waiting != null) { waiting.add(image); return }
+        thumbnailWaiters[id] = mutableListOf(image)
+        thumbnailExecutor.execute {
+            val bitmap = runCatching {
+                // IDs only come from the bundled, verified catalog; no arbitrary URLs or credentials.
+                val connection = java.net.URL("https://i.ytimg.com/vi/$id/mqdefault.jpg").openConnection() as java.net.HttpURLConnection
+                try {
+                    connection.connectTimeout = 5_000; connection.readTimeout = 5_000
+                    connection.instanceFollowRedirects = false
+                    if (connection.responseCode == 200) connection.inputStream.use(android.graphics.BitmapFactory::decodeStream) else null
+                } finally { connection.disconnect() }
+            }.getOrNull()
+            handler.post {
+                if (!released && bitmap != null) thumbnails[id] = bitmap
+                thumbnailWaiters.remove(id)?.forEach { view ->
+                    if (!released && bitmap != null) view.setImageBitmap(bitmap)
+                }
+            }
+        }
+    }
+
+    private fun playVideo(sample: VideoSample) {
+        if (!playbackAllowed || released || candidates.none { it.id == sample.id } || onContentOpen?.invoke() == false) return
+        selectedVideo = sample
+        val existing = webView
+        if (existing != null && selectedPage == Page.YOUTUBE) {
+            // An explicit card tap authorizes this play request. Preloading never calls this path.
+            existing.settings.mediaPlaybackRequiresUserGesture = false
+            existing.evaluateJavascript("window.binteumPlayVideo && window.binteumPlayVideo(${JSONObject.quote(sample.id)});", null)
+            refreshPresentation()
+        } else open(Page.YOUTUBE, play = true)
+        setStatus(context.getString(com.binteum.app.R.string.ui_text_139))
+        post { if (playbackAllowed && frame.isAttachedToWindow) frame.requestRectangleOnScreen(android.graphics.Rect(0, 0, frame.width, frame.height), false) }
+    }
+
+    private fun maybePreload() {
+        if (!playbackAllowed || released || preloadAttempted || webView != null || candidates.isEmpty() || !isAttachedToWindow) return
+        preloadAttempted = true
+        val expectedGeneration = generation
+        handler.post {
+            if (playbackAllowed && !released && webView == null && isAttachedToWindow && generation == expectedGeneration && candidates.isNotEmpty()) {
+                selectedVideo = candidates.first()
+                open(Page.YOUTUBE)
+            }
         }
     }
 
     /** Call whenever this panel is no longer the visible activity/tab. */
     fun pauseForHost() {
-        setPlaybackAllowed(false, "화면이 바뀌어 콘텐츠를 멈췄어요. 돌아오면 다시 선택해 주세요.")
+        setPlaybackAllowed(false, context.getString(com.binteum.app.R.string.ui_text_140))
     }
 
     /** Call from the owning activity's onDestroy. Safe to call repeatedly. */
@@ -173,6 +319,9 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         if (released) return
         playbackAllowed = false
         released = true
+        thumbnailExecutor.shutdownNow()
+        thumbnailWaiters.clear()
+        thumbnails.clear()
         refreshActions()
         destroySurface()
     }
@@ -257,19 +406,30 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private fun refreshActions() {
         launchButtons.forEach { it.isEnabled = playbackAllowed && !released }
         if (::reopenButton.isInitialized) reopenButton.isEnabled = playbackAllowed && !released && selectedPage != null
-        if (::closeButton.isInitialized) closeButton.isEnabled = webView != null && !released
+        if (::closeButton.isInitialized) {
+            closeButton.isEnabled = webView != null && !released
+            closeButton.visibility = if (webView != null) View.VISIBLE else View.GONE
+        }
+        if (::reopenButton.isInitialized) reopenButton.visibility =
+            if (selectedPage != null && webView == null) View.VISIBLE else View.GONE
+        currentTitle.visibility = if (selectedPage != null) View.VISIBLE else View.GONE
+        launcherRow.visibility = if (webView == null) View.VISIBLE else View.GONE
         themedButtons.forEach { it.view.alpha = if (it.view.isEnabled) 1f else 0.42f }
     }
 
     private fun refreshPresentation() {
-        val title = when (selectedPage) { Page.YOUTUBE -> "공식 예제 영상"; Page.REST -> "60초 눈 휴식"; null -> null }
+        val title = when (selectedPage) { Page.YOUTUBE -> selectedVideo.title; Page.REST -> context.getString(com.binteum.app.R.string.ui_text_141); null -> null }
         currentTitle.text = when {
-            webView != null -> "현재 콘텐츠 · $title"
-            title != null -> "최근 콘텐츠 · $title"
-            else -> "콘텐츠를 선택해 주세요"
+            webView != null -> context.getString(com.binteum.app.R.string.current_content, title)
+            title != null -> context.getString(com.binteum.app.R.string.recent_content, title)
+            else -> context.getString(com.binteum.app.R.string.ui_text_142)
         }
         launchers.forEach { item ->
             item.view.background = rounded(palette.surface, dp(24), if (webView != null && selectedPage == item.page) palette.accent else palette.border)
+        }
+        videoCards.forEach { (id, card) ->
+            card.background = rounded(palette.surface, dp(22), if (webView != null && id == selectedVideo.id) palette.textMuted else palette.border)
+            card.isSelected = webView != null && id == selectedVideo.id
         }
         refreshActions()
     }
@@ -289,7 +449,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         put("--app-border", cssColor(palette.border))
     }
 
-    private fun cssColor(color: Int) = "#%06x".format(color and 0xffffff)
+    private fun cssColor(color: Int) = "#%06x%02x".format(color and 0xffffff, color ushr 24)
 
     private fun themeDeclarations(): String {
         val colors = cssColors()
@@ -297,29 +457,32 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     }
 
     @Suppress("DEPRECATION", "SetJavaScriptEnabled")
-    private fun open(page: Page) {
+    private fun open(page: Page, play: Boolean = false) {
         if (!playbackAllowed || released) return
         if (onContentOpen?.invoke() == false) {
-            setPlaybackAllowed(false, "지금은 콘텐츠를 열 수 없어요. 차량 상태와 남은 시간을 확인해 주세요.")
+            setPlaybackAllowed(false, context.getString(com.binteum.app.R.string.ui_text_143))
             return
         }
         destroySurface()
         selectedPage = page
+        playWhenReady = play
         refreshPresentation()
         lastWebState = ""
         val origin = "https://${context.packageName.lowercase()}"
         val baseUrl = "$origin/media/"
         val html = try {
-            context.assets.open(page.asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            context.assets.open(if (page == Page.YOUTUBE && context.resources.configuration.locales[0].language == "en") "media/youtube-en.html" else page.asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                .replace("__VIDEO_ID__", selectedVideo.id)
                 .replace("__APP_ORIGIN__", origin)
                 .replace("__THEME_VARS__", themeDeclarations())
                 .replace("__COLOR_SCHEME__", if (palette.dark) "dark" else "light")
+                .replace("__LANG__", if (context.resources.configuration.locales[0].language == "en") "en" else "ko")
         } catch (_: Exception) {
-            setStatus("웹 콘텐츠 파일을 열지 못했어요. 앱을 다시 실행해 주세요.")
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_144))
             return
         }
-        val instance = try { WebView(context) } catch (_: Exception) {
-            setStatus("이 기기에서 WebView를 시작하지 못했어요. 다른 활동을 선택해 주세요.")
+        val instance = try { WebView(context).apply { settings.textZoom = (context.resources.configuration.fontScale * 100).toInt() } } catch (_: Exception) {
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_145))
             return
         }
         webView = instance
@@ -334,7 +497,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             allowFileAccessFromFileURLs = false
             allowUniversalAccessFromFileURLs = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            mediaPlaybackRequiresUserGesture = true
+            mediaPlaybackRequiresUserGesture = !play
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(false)
             safeBrowsingEnabled = true
@@ -358,13 +521,17 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
                 // website is ever loaded into the privileged local top-level document.
                 if (!request.isForMainFrame) return false
                 if (localDocument) return false
-                setStatus("외부 페이지는 직접 선택한 링크만 열 수 있어요.")
+                setStatus(context.getString(com.binteum.app.R.string.ui_text_146))
                 return true
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 if (webView === view && token == generation && pollingGeneration != token) {
                     applyHtmlPalette(view)
+                    if (playWhenReady && selectedPage == Page.YOUTUBE) {
+                        playWhenReady = false
+                        view.evaluateJavascript("window.binteumPlayVideo && window.binteumPlayVideo(${JSONObject.quote(selectedVideo.id)});", null)
+                    }
                     pollingGeneration = token
                     pollState(view, token)
                 }
@@ -372,38 +539,37 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame && webView === view) {
-                    setStatus("웹 콘텐츠를 불러오지 못했어요. 연결을 확인하거나 웹 휴식을 선택해 주세요.")
+                    setStatus(context.getString(com.binteum.app.R.string.ui_text_147))
                 }
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 if (request.isForMainFrame && webView === view) {
-                    setStatus("서버 응답 오류 ${response.statusCode}. 다시 열거나 웹 휴식을 선택해 주세요.")
+                    setStatus(context.getString(com.binteum.app.R.string.server_error, response.statusCode))
                 }
             }
 
             override fun onReceivedSslError(view: WebView, sslHandler: SslErrorHandler, error: SslError) {
                 sslHandler.cancel()
-                if (webView === view) setStatus("보안 연결을 확인하지 못해 콘텐츠를 열지 않았어요.")
+                if (webView === view) setStatus(context.getString(com.binteum.app.R.string.ui_text_148))
             }
 
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (webView === view) {
                     generation++
-                    handler.removeCallbacksAndMessages(null)
                     webView = null
                     frame.removeView(view)
                     frame.visibility = View.GONE
                     view.destroy()
                     refreshPresentation()
-                    setStatus("웹 화면이 종료됐어요. 직접 다시 열거나 다른 활동을 선택해 주세요.")
+                    setStatus(context.getString(com.binteum.app.R.string.ui_text_149))
                 }
                 return true
             }
         }
         frame.visibility = View.VISIBLE
         frame.addView(instance, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        setStatus(if (page == Page.YOUTUBE) "YouTube 플레이어를 연결하고 있어요. 재생 가능 여부는 연결 후 확인됩니다." else "기기 안의 웹 휴식을 열고 있어요.")
+        setStatus(if (page == Page.YOUTUBE) context.getString(com.binteum.app.R.string.ui_text_150) else context.getString(com.binteum.app.R.string.ui_text_151))
         // Android sets this real app identifier as the HTTPS origin/Referer. This
         // does not host a site or assert that this Pleos device is certified.
         instance.loadDataWithBaseURL(baseUrl, html, "text/html", "UTF-8", baseUrl)
@@ -425,18 +591,18 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             if (state.isNotEmpty() && key != lastWebState) {
                 lastWebState = key
                 setStatus(when (state) {
-                    "ready" -> "플레이어에서 재생 버튼을 눌러 주세요."
-                    "playing" -> "YouTube 플레이어가 재생 중이에요."
-                    "paused" -> "영상이 일시정지됐어요."
-                    "buffering" -> "영상을 불러오는 중이에요."
-                    "ended" -> "영상이 끝났어요. 충전 상태와 활동 종료는 별도로 확인해 주세요."
-                    "autoplay_blocked" -> "자동 재생이 제한됐어요. 플레이어의 재생 버튼을 직접 눌러 주세요."
+                    "ready" -> context.getString(com.binteum.app.R.string.ui_text_152)
+                    "playing" -> context.getString(com.binteum.app.R.string.ui_text_153)
+                    "paused" -> context.getString(com.binteum.app.R.string.ui_text_154)
+                    "buffering" -> context.getString(com.binteum.app.R.string.ui_text_155)
+                    "ended" -> context.getString(com.binteum.app.R.string.ui_text_156)
+                    "autoplay_blocked" -> context.getString(com.binteum.app.R.string.ui_text_157)
                     "error" -> playerError(info?.optString("code").orEmpty())
-                    "rest_ready" -> "60초 눈 쉬기 페이지에서 시작을 눌러 주세요. 네트워크 없이 사용할 수 있어요."
-                    "rest_running" -> "웹 휴식을 진행하고 있어요. 편안한 자세로 쉬어 주세요."
-                    "rest_paused" -> "웹 휴식을 멈췄어요. 다시 시작할 수 있어요."
-                    "rest_complete" -> "60초 웹 휴식이 끝났어요. 앱에서 직접 마무리해 주세요."
-                    else -> "콘텐츠를 준비하고 있어요."
+                    "rest_ready" -> context.getString(com.binteum.app.R.string.ui_text_158)
+                    "rest_running" -> context.getString(com.binteum.app.R.string.ui_text_159)
+                    "rest_paused" -> context.getString(com.binteum.app.R.string.ui_text_160)
+                    "rest_complete" -> context.getString(com.binteum.app.R.string.ui_text_161)
+                    else -> context.getString(com.binteum.app.R.string.ui_text_162)
                 })
             }
             handler.postDelayed({ pollState(view, token) }, 750L)
@@ -444,12 +610,12 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     }
 
     private fun playerError(code: String): String = when (code) {
-        "100" -> "예제 영상이 삭제되었거나 비공개예요. 웹 휴식을 선택해 주세요."
-        "101", "150" -> "이 영상은 앱 안에서 재생할 수 없어요. 웹 휴식을 선택해 주세요."
-        "153" -> "YouTube가 앱 식별정보를 확인하지 못했어요(153). 이 기기의 재생 환경을 점검해야 해요."
-        "5" -> "이 기기의 웹 플레이어에서 영상을 재생하지 못했어요(5)."
-        "timeout", "script" -> "YouTube 연결을 완료하지 못했어요. 다시 열거나 네트워크 없는 웹 휴식을 이용해 주세요."
-        else -> "영상 재생 오류${if (code.isBlank()) "" else " ($code)"}. 다시 열거나 웹 휴식을 선택해 주세요."
+        "100" -> context.getString(com.binteum.app.R.string.ui_text_163)
+        "101", "150" -> context.getString(com.binteum.app.R.string.ui_text_164)
+        "153" -> context.getString(com.binteum.app.R.string.ui_text_165)
+        "5" -> context.getString(com.binteum.app.R.string.ui_text_166)
+        "timeout", "script" -> context.getString(com.binteum.app.R.string.ui_text_167)
+        else -> context.getString(com.binteum.app.R.string.video_error, code)
     }
 
     private fun openExternal(uri: Uri) {
@@ -460,15 +626,15 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         try {
             context.startActivity(Intent(Intent.ACTION_VIEW, uri).apply { addCategory(Intent.CATEGORY_BROWSABLE) })
         } catch (_: ActivityNotFoundException) {
-            setStatus("이 기기에는 링크를 열 수 있는 앱이 없어요. 차량 상태 확인 후 다른 활동을 선택해 주세요.")
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_168))
         } catch (_: SecurityException) {
-            setStatus("이 기기는 외부 링크 열기를 허용하지 않아요. 다른 활동을 선택해 주세요.")
+            setStatus(context.getString(com.binteum.app.R.string.ui_text_169))
         }
     }
 
     private fun destroySurface() {
         generation++
-        handler.removeCallbacksAndMessages(null)
+        playWhenReady = false
         val previous = webView
         webView = null
         if (previous != null) {

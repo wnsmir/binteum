@@ -31,7 +31,7 @@ object ActivityCatalog {
                 "편안한 자세로 앉아 화면에서 잠시 시선을 떼세요.",
                 "눈을 감거나, 편안하다면 먼 곳을 가볍게 바라보세요.",
                 "호흡을 억지로 바꾸지 않고 잠시 쉬어 보세요.",
-                "불편하거나 다른 일을 해야 하면 언제든 끝내도 괜찮아요.",
+                "불편하면 활동을 중단하세요.",
             ),
         ),
         OwnActivity(
@@ -43,7 +43,7 @@ object ActivityCatalog {
                 "지금 머릿속에 떠오르는 일 하나를 골라 보세요.",
                 "그 일에서 이미 끝낸 부분과 아직 남은 부분을 나눠 생각해 보세요.",
                 "다음에 할 수 있는 가장 작은 행동 하나를 정해 보세요.",
-                "당장 해결하지 않아도 괜찮아요. 남은 시간은 편히 쉬세요.",
+                "정한 행동을 기억하고 활동을 마칩니다.",
             ),
         ),
         OwnActivity(
@@ -52,7 +52,7 @@ object ActivityCatalog {
             kind = ActivityKind.QUIZ,
             durationSeconds = 480,
             instructions = listOf(
-                "다섯 문제를 천천히 풀어 보세요. 점수 경쟁은 없어요.",
+                "문제 5개를 풀고 정답을 확인합니다.",
                 "답을 고르면 짧은 설명을 볼 수 있어요.",
                 "문제를 다 풀면 남은 시간은 쉬거나 활동을 마칠 수 있어요.",
             ),
@@ -71,7 +71,28 @@ object ActivityCatalog {
         ),
     )
 
-    fun find(id: String): OwnActivity? = all.firstOrNull { it.id == id }
+    // Explicitly selected guided sessions; keep the existing preference ranking unchanged.
+    val guided = listOf(
+        OwnActivity("breathing_3", "3분 호흡", ActivityKind.REST, 180, listOf(
+            "어깨의 힘을 빼고 편안하게 앉아 보세요.",
+            "평소처럼 자연스럽게 숨을 들이쉬고 내쉬세요. 숨을 참거나 깊게 쉬려고 애쓰지 않아도 돼요.",
+            "호흡이 오가는 느낌에 잠시 주의를 기울여 보세요.",
+            "불편하면 바로 멈추고 편안한 호흡으로 돌아오세요.",
+        )),
+        OwnActivity("meditation_3", "3분 명상", ActivityKind.REST, 180, listOf(
+            "편안한 자세로 앉아 시선을 부드럽게 내려놓으세요.",
+            "몸이 좌석에 닿는 느낌과 주변의 소리를 가볍게 알아차려 보세요.",
+            "생각이 떠오르면 해결하려 하지 않고 다시 지금의 감각으로 돌아와 보세요.",
+            "활동을 마친 뒤 출발 전 주변을 확인하세요.",
+        )),
+    )
+
+    fun find(id: String): OwnActivity? = (all + guided).firstOrNull { it.id == id }
+
+    fun canStart(id: String, windowSeconds: Int, status: SessionStatus): Boolean =
+        status == SessionStatus.CHARGING && find(id)?.let {
+            it.durationSeconds.toLong() + ActivityRecommender.DEFAULT_RESERVE_SECONDS <= windowSeconds.toLong()
+        } == true
 }
 
 data class FeedbackCounts(val likes: Int = 0, val dislikes: Int = 0) {

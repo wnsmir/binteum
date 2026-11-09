@@ -1,5 +1,6 @@
 package com.binteum.app
 
+import android.app.AlertDialog
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.Intent
@@ -36,7 +37,52 @@ import java.util.UUID
 import kotlin.math.abs
 
 class MainActivity : Activity() {
-    private var themeMode = ThemeMode.SYSTEM
+    override fun attachBaseContext(base: android.content.Context) {
+        val preferences = base.getSharedPreferences("binteum_experience", MODE_PRIVATE)
+        val config = Configuration(base.resources.configuration)
+        val scale = preferences.getFloat("textScale", 1f).takeIf { it in .85f..1.3f } ?: 1f
+        config.fontScale = config.fontScale * scale
+        val language = preferences.getString("language", "ko").takeIf { it == "ko" || it == "en" } ?: "ko"
+        config.setLocale(java.util.Locale.forLanguageTag(language))
+        super.attachBaseContext(base.createConfigurationContext(config))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("tab", tab)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun changeReadingPreference(key: String, language: String? = null, scale: Float? = null) {
+        val edit = prefs.edit()
+        if (language != null) edit.putString(key, language)
+        if (scale != null) edit.putFloat(key, scale)
+        edit.apply()
+        saveCheckpoint()
+        recreate()
+    }
+
+    private fun backgroundTitle(mode: BackgroundMode): String = getString(when (mode) {
+        BackgroundMode.AUTO -> R.string.sky_auto
+        BackgroundMode.DAWN -> R.string.sky_dawn
+        BackgroundMode.DAY -> R.string.sky_day
+        BackgroundMode.SUNSET -> R.string.sky_sunset
+        BackgroundMode.NIGHT -> R.string.sky_night
+        BackgroundMode.BLACK -> R.string.sky_black
+        BackgroundMode.WHITE -> R.string.sky_white
+    })
+
+    private lateinit var completionVoice: com.binteum.app.audio.CompletionVoice
+    private fun announceCompletion() {
+        if (prefs.getBoolean("completionVoice", true) && resumed && safeToConfigure()) {
+            completionVoice.speak(getString(R.string.voice_complete),
+                if (resources.configuration.locales[0].language == "en") java.util.Locale.US else java.util.Locale.KOREA)
+        }
+    }
+    private var themeMode = ThemeMode.DARK
+    private var backgroundMode = BackgroundMode.AUTO
+    private var backgroundMotion = true
+    private var panelOnRight = false
+    private val ambientBackground = AmbientBackgroundDrawable()
     private lateinit var palette: AppPalette
     private val ink get() = palette.text
     private val muted get() = palette.textMuted
@@ -48,7 +94,14 @@ class MainActivity : Activity() {
     private lateinit var media: WebMediaPanel
     private var target = 80
     private var windowMinutes = 20
-    private var session = ChargingSession(80)
+    private var targetMode = false
+    private var reminderStart = 0L
+    private var reminderFinish = 0L
+    private var reminderDial: ReminderDialView? = null
+    private var modeToggle: ReminderModeToggle? = null
+    private var reminderSubtitle: TextView? = null
+    private var confirmReminder: Button? = null
+    private var session = ChargingSession(80, targetEnabled = false)
     private var status = SessionStatus.WAITING_FOR_DATA
     private var snapshot: VehicleSnapshot? = null
     private var sourceStartedAt = 0L
@@ -57,12 +110,38 @@ class MainActivity : Activity() {
     private var demoMode = false
     private var demoScenario = 0
     private var tab = 0
-    private var chargeControlsExpanded = false
     private var developerOptionsExpanded = false
+    private var moreActivitiesExpanded = false
+    private val expandedSettings = mutableSetOf<String>()
+    private var transientDialog: android.app.Dialog? = null
+    private var connectionCard: LinearLayout? = null
+    private var animateConnectionRefresh = false
+    private val connectionRefresh = Runnable {
+        val card = connectionCard
+        if (tab == 2 && card?.isAttachedToWindow == true && started) {
+            val parent = card.parent as? ViewGroup
+            if (parent != null && animateConnectionRefresh && android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                android.transition.TransitionManager.endTransitions(parent)
+                val transition = android.transition.TransitionSet().apply {
+                    ordering = android.transition.TransitionSet.ORDERING_TOGETHER
+                    addTransition(android.transition.ChangeBounds())
+                    addTransition(android.transition.Fade(android.transition.Fade.IN or android.transition.Fade.OUT))
+                    duration = 260
+                    interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+                    setMatchOrder(android.transition.Transition.MATCH_NAME, android.transition.Transition.MATCH_INSTANCE)
+                }
+                android.transition.TransitionManager.beginDelayedTransition(parent, transition)
+            }
+            card.removeAllViews()
+            populateConnectionSettings(card)
+            updateLabels()
+        }
+        animateConnectionRefresh = false
+    }
     private var learningOn = true
     private var windowEndElapsed = 0L
     private var windowEndWall = 0L
-    private var message = "차량 상태를 확인하고 있어요."
+    private var message = ""
     private var active: Run? = null
     private var recovery: Run? = null
     private var completed: Run? = null
@@ -70,14 +149,10 @@ class MainActivity : Activity() {
     private var quizAnswer: Int? = null
     private var socLabel: TextView? = null
     private var statusLabel: TextView? = null
-    private var windowLabel: TextView? = null
     private var timerLabel: TextView? = null
     private var diagnosticsLabel: TextView? = null
-    private var chargeGauge: ChargeGaugeView? = null
     private var leftScroll: ScrollView? = null
     private var contentScroll: ScrollView? = null
-    private val timeButtons = mutableListOf<Button>()
-    private var resetWindowButton: Button? = null
     private var lastWindowHasBudget = true
     private var lastWindowContentKey = ""
     private var lastReadinessKey = ""
@@ -87,35 +162,59 @@ class MainActivity : Activity() {
     private val ticker = object : Runnable {
         override fun run() {
             if (!started) return
+            ambientBackground.updateClock()
+            ambientBackground.setActive(resumed && safeToConfigure())
             if (demoMode && demoScenario != 4) emitDemoScenario()
             snapshot?.let(::acceptSnapshot)
+            if (TimerCompletion.isDue(SystemClock.elapsedRealtime(), windowEndElapsed, reminderStart, reminderFinish, targetMode)) {
+                reminderFinish = windowEndElapsed
+                media.pauseForHost(); active = null; recovery = null; completed = null
+                message = getString(com.binteum.app.R.string.ui_text_001)
+                saveCheckpoint(); render(preserveScroll = true)
+                // Do not announce an old expiry when returning from another app or suspend.
+                if (TimerCompletion.canAnnounce(SystemClock.elapsedRealtime(), windowEndElapsed, resumed)) announceCompletion()
+            }
+            if (!safeToConfigure()) completionVoice.stop()
             updateLabels()
             refreshMediaGate()
             val hasBudget = remainingWindowSeconds() > ActivityRecommender.DEFAULT_RESERVE_SECONDS
             if (lastWindowHasBudget && !hasBudget) {
                 media.pauseForHost()
-                message = "마무리할 시간이에요. 새 활동은 다음 대기 시간에 시작해 주세요."
+                message = getString(com.binteum.app.R.string.ui_text_002)
                 if (active == null) render()
             }
             lastWindowHasBudget = hasBudget
             if (tab != 2 && allowed() && active == null && recovery == null && completed == null &&
-                windowContentKey() != lastWindowContentKey) render()
+                windowContentKey() != lastWindowContentKey) render(preserveScroll = true)
             handler.postDelayed(this, 1_000)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "SYSTEM") ?: "SYSTEM") }.getOrDefault(ThemeMode.SYSTEM)
+        tab = savedInstanceState?.getInt("tab", 0) ?: 0
+        themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
-        target = prefs.getInt("target", 80).takeIf { it in listOf(70, 80, 90) } ?: 80
-        windowMinutes = prefs.getInt("windowMinutes", 20).takeIf { it in listOf(8, 20, 40, 60) } ?: 20
+        backgroundMode = runCatching {
+            BackgroundMode.valueOf(prefs.getString("backgroundMode", "AUTO") ?: "AUTO")
+        }.getOrDefault(BackgroundMode.AUTO)
+        backgroundMotion = prefs.getBoolean("backgroundMotion", true)
+        panelOnRight = prefs.getBoolean("panelOnRight", false)
+        target = prefs.getInt("target", 80).takeIf { it in 1..100 } ?: 80
+        windowMinutes = prefs.getInt("windowMinutes", 20).takeIf { it in 1..120 } ?: 20
         learningOn = prefs.getBoolean("learningOn", true)
         demoMode = BuildConfig.DEBUG && prefs.getBoolean("demoMode", false)
         demoScenario = prefs.getInt("demoScenario", 0).coerceIn(0, 4)
-        val reached = prefs.getBoolean("targetReached", false)
-        session = ChargingSession(target, checkpoint = SessionCheckpoint(target, reached,
-            reached && prefs.getBoolean("targetNotified", false)))
+        targetMode = prefs.getBoolean("targetMode", false)
+        completionVoice = com.binteum.app.audio.CompletionVoice(this,
+            { resumed && safeToConfigure() && prefs.getBoolean("completionVoice", true) },
+            { error -> android.widget.Toast.makeText(this,
+                when (error) {
+                    ai.pleos.playground.tts.constant.ErrorType.ON_DEVICE_ENGINE_ERROR -> R.string.voice_engine_failed
+                    ai.pleos.playground.tts.constant.ErrorType.PERMISSION_DENIED -> R.string.voice_permission_failed
+                    else -> R.string.voice_failed
+                },
+                android.widget.Toast.LENGTH_LONG).show() })
         media = WebMediaPanel(this)
         media.onContentOpen = {
             if (allowed() && remainingWindowSeconds() > 120 && active == null && recovery == null) {
@@ -125,6 +224,11 @@ class MainActivity : Activity() {
         }
         source = makeSource()
         restoreCheckpoint()
+        // Activities are withdrawn from the UI. Keep stored preferences, but never resume an old activity.
+        active = null; recovery = null; completed = null
+        val reached = reminderStart > 0 && targetMode && prefs.getBoolean("targetReached", false)
+        session = ChargingSession(target, checkpoint = SessionCheckpoint(target, reached,
+            reached && prefs.getBoolean("targetNotified", false)), targetEnabled = targetMode && reminderStart > 0)
         render()
     }
 
@@ -134,7 +238,7 @@ class MainActivity : Activity() {
         snapshot = null
         status = SessionStatus.WAITING_FOR_DATA
         sourceStartedAt = System.currentTimeMillis()
-        media.setPlaybackAllowed(false, "새 차량 상태를 확인하고 있어요.")
+        media.setPlaybackAllowed(false, getString(com.binteum.app.R.string.ui_text_003))
         render()
         source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
         if (demoMode) emitDemoScenario()
@@ -143,6 +247,10 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        completionVoice.stop()
+        ambientBackground.setActive(false)
+        transientDialog?.dismiss()
+        transientDialog = null
         media.pauseForHost()
         saveCheckpoint()
         super.onPause()
@@ -158,13 +266,19 @@ class MainActivity : Activity() {
     override fun onStop() {
         started = false
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(connectionRefresh)
         active?.let { recovery = it; active = null }
         saveCheckpoint()
         source.stop()
         super.onStop()
     }
 
-    override fun onDestroy() { media.release(); super.onDestroy() }
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (tab == 2) navigateTo(0) else super.onBackPressed()
+    }
+
+    override fun onDestroy() { completionVoice.stop(); ambientBackground.release(); media.release(); super.onDestroy() }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -187,18 +301,19 @@ class MainActivity : Activity() {
             media.setPlaybackAllowed(false, statusText())
             if (active != null) {
                 active = null; completed = null
-                message = "${statusText()} 활동을 중단했어요. 취향 평가에는 반영하지 않아요."
+                message = getString(R.string.activity_interrupted, statusText())
                 saveCheckpoint()
             }
             if (status != SessionStatus.WAITING_FOR_DATA && recovery != null) {
                 recovery = null
-                message = "차량 상태가 바뀌어 이전 활동을 중단했어요."
+                message = getString(com.binteum.app.R.string.ui_text_004)
                 saveCheckpoint()
             }
         }
         if (result.notifyTargetReached) {
-            message = "설정한 ${target}%에 도달했어요. 차량 이동을 준비해 주세요."
-            persistTarget()
+            if (reminderStart > 0 && reminderFinish == 0L) reminderFinish = SystemClock.elapsedRealtime()
+            message = getString(R.string.target_reached_percent, target)
+            persistTarget(); saveCheckpoint()
         }
         val readinessKey = "$status/${hasEnergyPermission()}/${value.stateOfCharge != null}/${value.charging != null}/${value.uxRestricted}"
         if (BuildConfig.DEBUG && !demoMode) {
@@ -211,45 +326,42 @@ class MainActivity : Activity() {
         }
         if (previous != status || lastReadinessKey != readinessKey) {
             lastReadinessKey = readinessKey
-            render()
+            if (tab == 2 && connectionCard?.isAttachedToWindow == true) refreshConnectionSettings(false)
+            else render()
         } else updateLabels()
+        if (!safeToConfigure()) transientDialog?.dismiss()
+        maybeShowEnergyIntroduction()
     }
 
     private fun statusText() = when (status) {
-        SessionStatus.CHARGING -> "충전 중 · 차 안 활동 가능"
-        SessionStatus.TARGET_REACHED -> "목표 잔량에 도달했어요"
-        SessionStatus.INTERRUPTED -> "충전 중이 아니에요 · 연결 확인"
-        SessionStatus.DRIVING_LOCKED -> "주행 제한 · 활동을 멈췄어요"
-        SessionStatus.SUSPENDED -> "화면 비활성 · 상태 확인 중단"
-        SessionStatus.WAITING_FOR_DATA -> "차량·안전 상태 확인 필요"
+        SessionStatus.CHARGING -> getString(com.binteum.app.R.string.ui_text_005)
+        SessionStatus.TARGET_REACHED -> getString(com.binteum.app.R.string.ui_text_006)
+        SessionStatus.INTERRUPTED -> getString(com.binteum.app.R.string.ui_text_007)
+        SessionStatus.DRIVING_LOCKED -> getString(com.binteum.app.R.string.ui_text_008)
+        SessionStatus.SUSPENDED -> getString(com.binteum.app.R.string.ui_text_009)
+        SessionStatus.WAITING_FOR_DATA -> getString(com.binteum.app.R.string.ui_text_010)
     }
 
     private fun safeToConfigure(): Boolean = started && resumed && snapshot?.let {
         it.vehicleAwake && it.uxRestricted == false &&
             System.currentTimeMillis() - it.observedAtMillis in 0..30_000 && it.observedAtMillis >= sourceStartedAt
     } == true
-    private fun allowed(): Boolean = safeToConfigure() && status == SessionStatus.CHARGING
+    private fun allowed(): Boolean = reminderStart > 0 && reminderFinish == 0L && safeToConfigure() && status == SessionStatus.CHARGING
     private fun refreshMediaGate() {
-        media.setPlaybackAllowed(tab == 1 && allowed() && remainingWindowSeconds() > 120 && active == null && recovery == null,
-            if (remainingWindowSeconds() <= 120) "마무리할 시간이에요. 새 대기 시간을 설정해 주세요." else statusText())
+        media.updateRecommendations(if (targetMode) null else remainingWindowSeconds())
+        media.setPlaybackAllowed(tab == 0 && allowed() && remainingWindowSeconds() > 120 && active == null && recovery == null && completed == null,
+            if (remainingWindowSeconds() <= 120) getString(com.binteum.app.R.string.ui_text_011) else statusText())
     }
-    private fun startWindowIfNeeded() {
-        if (windowEndElapsed == 0L) {
-            windowEndElapsed = SystemClock.elapsedRealtime() + windowMinutes * 60_000L
-            windowEndWall = System.currentTimeMillis() + windowMinutes * 60_000L
-            lastWindowHasBudget = true
-            saveCheckpoint()
-            updateLabels()
-        }
-    }
-    private fun remainingWindowSeconds(): Int = if (windowEndElapsed == 0L) windowMinutes * 60 else
-        ((windowEndElapsed - SystemClock.elapsedRealtime()).coerceAtLeast(0) / 1000).toInt()
+    private fun startWindowIfNeeded() { /* The user starts the clock with 확인, never by opening content. */ }
+    private fun remainingWindowSeconds(): Int = if (targetMode) Int.MAX_VALUE
+        else if (windowEndElapsed == 0L) windowMinutes * 60
+        else ((windowEndElapsed - SystemClock.elapsedRealtime()).coerceAtLeast(0) / 1000).toInt()
     private fun windowContentKey(): String {
         val remaining = remainingWindowSeconds()
         val phase = when { remaining == 0 -> "ended"; remaining <= ActivityRecommender.DEFAULT_RESERVE_SECONDS -> "finishing"; else -> "available" }
-        val eligible = ActivityCatalog.all.filter { it.durationSeconds + ActivityRecommender.DEFAULT_RESERVE_SECONDS <= remaining }
+        val eligible = (ActivityCatalog.all + ActivityCatalog.guided).filter { it.durationSeconds + ActivityRecommender.DEFAULT_RESERVE_SECONDS <= remaining }
             .joinToString(",") { it.id }
-        return if (tab == 1) phase else "$phase/$eligible"
+        return if (media.hasOpenContent) phase else "$phase/$eligible"
     }
     private fun remainingActivitySeconds(run: Run): Int {
         val duration = ActivityCatalog.find(run.activityId)?.durationSeconds ?: 0
@@ -261,32 +373,27 @@ class MainActivity : Activity() {
 
     private fun render(preserveScroll: Boolean = false) {
         if (!::media.isInitialized) return
+        palette = AppTheme.palette(this, themeMode, backgroundMode)
+        handler.removeCallbacks(connectionRefresh)
+        animateConnectionRefresh = false
+        connectionCard = null
         val previousLeftScroll = if (preserveScroll) leftScroll?.scrollY ?: 0 else 0
         val previousContentScroll = if (preserveScroll) contentScroll?.scrollY ?: 0 else 0
         lastWindowContentKey = windowContentKey()
-        val preserveMedia = tab == 1 && allowed()
+        val preserveMedia = tab == 0 && allowed() && active == null && recovery == null && completed == null
         if (preserveMedia) media.beginHostReparent()
         try {
             (media.parent as? ViewGroup)?.removeView(media)
             media.applyPalette(palette)
-            timerLabel = null; diagnosticsLabel = null; chargeGauge = null
-            timeButtons.clear()
+            timerLabel = null; diagnosticsLabel = null
             window.statusBarColor = paper
             window.navigationBarColor = palette.surface
+            // The same drawable survives UI rebuilds so its motion never restarts on tab/theme changes.
+            ambientBackground.configure(backgroundMode, palette.dark, backgroundMotion)
             val root = column().apply {
-                setBackgroundColor(paper)
+                background = ambientBackground
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isForceDarkAllowed = false
             }
-            val top = row().apply { setPadding(dp(28), dp(12), dp(28), dp(12)); gravity = Gravity.CENTER_VERTICAL }
-            top.addView(icon(AppIcon.SPARKLES, palette.text, 32), LinearLayout.LayoutParams(dp(40), dp(40)))
-            top.addView(label("빈틈의실", 28f, true).apply { setPadding(dp(12), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
-            val compactHeader = resources.configuration.screenWidthDp < 650
-            top.addView(badge(if (demoMode) (if (compactHeader) "시연" else "시연 · 모의 데이터") else "차량 연결", if (demoMode) palette.warningSurface else palette.surfaceAlt,
-                if (demoMode) palette.warning else muted))
-            top.addView(iconButton(if (palette.dark) "라이트 모드" else "다크 모드", if (palette.dark) AppIcon.SUN else AppIcon.MOON) {
-                changeTheme(if (palette.dark) ThemeMode.LIGHT else ThemeMode.DARK)
-            }, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(16) })
-            root.addView(top)
             val wide = resources.configuration.screenWidthDp >= 1100
             val body = if (wide) row() else column()
             val left = buildLeft(!wide)
@@ -296,10 +403,15 @@ class MainActivity : Activity() {
                 body.setPadding(dp(16), 0, dp(16), dp(12))
                 leftScroll = ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(left) }
                 contentScroll = ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(right) }
-                body.addView(leftScroll,
-                    LinearLayout.LayoutParams(dp(sideWidth), -1))
-                body.addView(contentScroll,
-                    LinearLayout.LayoutParams(0, -1, 1f))
+                val panelParams = LinearLayout.LayoutParams(dp(sideWidth), -1)
+                val contentParams = LinearLayout.LayoutParams(0, -1, 1f)
+                if (panelOnRight) {
+                    body.addView(contentScroll, contentParams)
+                    body.addView(leftScroll, panelParams)
+                } else {
+                    body.addView(leftScroll, panelParams)
+                    body.addView(contentScroll, contentParams)
+                }
                 root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
                 body.setPadding(dp(16), 0, dp(16), dp(12))
@@ -308,30 +420,9 @@ class MainActivity : Activity() {
                 contentScroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(body) }
                 root.addView(contentScroll, LinearLayout.LayoutParams(-1, 0, 1f))
             }
-            val dock = row().apply {
-                gravity = Gravity.CENTER; setPadding(dp(20), dp(12), dp(20), dp(12)); setBackgroundColor(palette.surface)
-            }
-            val tabs = listOf("대시보드" to AppIcon.DASHBOARD, "미디어" to AppIcon.PLAY, "설정" to AppIcon.SETTINGS)
-            tabs.forEachIndexed { index, (name, glyph) ->
-                dock.addView(button(if (compactHeader && index == 0) "홈" else name, tab == index) {
-                    if (tab != index) {
-                        media.pauseForHost()
-                        if (active != null && index != 0) interruptActivity("활동을 중단했어요. 다른 시간을 골라 보세요.")
-                        tab = index; render()
-                    }
-                }.apply {
-                    minHeight = dp(72)
-                    if (compactHeader) {
-                        setPadding(dp(8), dp(10), dp(8), dp(10))
-                        setCompoundDrawablesRelativeWithIntrinsicBounds(null, IconDrawable(glyph, if (tab == index) palette.onAccent else muted, dp(26)), null, null)
-                        compoundDrawablePadding = dp(6)
-                    } else withIcon(glyph, if (tab == index) palette.onAccent else muted)
-                    contentDescription = "$name${if (tab == index) ", 선택됨" else ""}"
-                    isSelected = tab == index
-                }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(6), 0, dp(6), 0) })
-            }
-            root.addView(dock)
             setContentView(root)
+            ambientBackground.callback = root
+            ambientBackground.setActive(resumed && safeToConfigure())
             updateSystemBars()
             if (preserveScroll) {
                 val nextLeftScroll = leftScroll
@@ -349,135 +440,154 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun performPanelAction() {
+        if (tab == 2) navigateTo(0) else movePanel(!panelOnRight)
+    }
+
+    private fun buildPanelActionButton(): Button {
+        val confirming = tab == 2
+        val title = if (confirming) getString(R.string.settings_apply) else if (panelOnRight) "←" else "→"
+        return button(title, selected = confirming) { performPanelAction() }.apply {
+            contentDescription = if (confirming) getString(R.string.settings_confirm)
+                else getString(if (panelOnRight) R.string.panel_move_left else R.string.panel_move_right)
+            tooltipText = contentDescription
+            textSize = if (confirming) 24f else 32f
+        }
+    }
+
+    private fun movePanel(toRight: Boolean) {
+        if (panelOnRight == toRight) return
+        fun screenX(view: View?): Int? = view?.let {
+            val position = IntArray(2); it.getLocationOnScreen(position); position[0]
+        }
+        val previousPanelX = screenX(leftScroll)
+        val previousContentX = screenX(contentScroll)
+        panelOnRight = toRight
+        prefs.edit().putBoolean("panelOnRight", toRight).apply()
+        render(preserveScroll = true)
+        if (!android.animation.ValueAnimator.areAnimatorsEnabled() || leftScroll == null) return
+        listOf(leftScroll to previousPanelX, contentScroll to previousContentX).forEach { (view, oldX) ->
+            if (view != null && oldX != null) view.post {
+                if (view.isAttachedToWindow) {
+                    val nextX = screenX(view) ?: oldX
+                    view.translationX = (oldX - nextX).toFloat()
+                    view.animate().translationX(0f).setDuration(320)
+                        .setInterpolator(android.view.animation.AccelerateDecelerateInterpolator()).start()
+                }
+            }
+        }
+    }
+
     private fun buildLeft(compact: Boolean): LinearLayout = column().apply {
-        val largeText = resources.configuration.fontScale >= 1.3f
-        setPadding(dp(24), dp(24), dp(24), dp(24))
-        background = rounded(palette.surface, 28)
-        addView(sectionTitle("지금의 충전", AppIcon.BATTERY))
-        if (compact || largeText) {
-            val stacked = largeText || resources.configuration.screenWidthDp < 450
-            val summary = (if (stacked) column() else row()).apply {
-                gravity = Gravity.CENTER_VERTICAL; isBaselineAligned = false
-            }
-            socLabel = label("—", if (largeText) 48f else 56f, true).apply { setSingleLine(true) }.also {
-                summary.addView(it, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(20) })
-            }
-            statusLabel = label(statusText(), 24f).also {
-                summary.addView(it, if (stacked) LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f))
-            }
-            addView(summary)
+        setPadding(dp(20), dp(20), dp(20), dp(24))
+        background = rounded(palette.surface, 32, palette.border)
+        gravity = Gravity.CENTER_HORIZONTAL
+        val utilityWidth = 64
+        val utilities = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        if (tab == 2) {
+            utilities.addView(View(this@MainActivity), LinearLayout.LayoutParams(dp(64), dp(64)))
         } else {
-            val gaugeFrame = FrameLayout(this@MainActivity)
-            chargeGauge = ChargeGaugeView(this@MainActivity).also { gaugeFrame.addView(it, FrameLayout.LayoutParams(-1, -1)) }
-            val number = column().apply { gravity = Gravity.CENTER }
-            socLabel = label("—", 64f, true).apply {
-                gravity = Gravity.CENTER
-                setSingleLine(true)
-                setPadding(0, dp(4), 0, dp(4))
-                setAutoSizeTextTypeUniformWithConfiguration(32, 64, 2, android.util.TypedValue.COMPLEX_UNIT_SP)
-            }.also { number.addView(it, LinearLayout.LayoutParams(-1, -2)) }
-            number.addView(label("현재 배터리", 23f).apply {
-                setTextColor(muted); gravity = Gravity.CENTER
-            }, LinearLayout.LayoutParams(-1, -2))
-            gaugeFrame.addView(number, FrameLayout.LayoutParams(dp(168), -2, Gravity.CENTER))
-            addView(gaugeFrame, LinearLayout.LayoutParams(-1, dp(230)))
-            statusLabel = label(statusText(), 24f).apply { gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(16)) }.also { addView(it) }
+            utilities.addView(iconButton(getString(com.binteum.app.R.string.ui_text_014), AppIcon.SETTINGS) { navigateTo(2) }, LinearLayout.LayoutParams(dp(64), dp(64)))
         }
-        val timeSummary = column().apply {
-            setPadding(dp(20), dp(12), dp(20), dp(12)); background = rounded(palette.surfaceAlt)
-            addView(sectionTitle("나의 대기시간", AppIcon.CLOCK))
-            windowLabel = label("", if (compact) 30f else 36f, true).also { addView(it) }
-            addView(label("마무리 여유 2분 포함", 22f).apply { setTextColor(muted) })
+        utilities.addView(label(if (tab == 2) getString(com.binteum.app.R.string.ui_text_014) else getString(com.binteum.app.R.string.ui_text_015), 24f, true).apply {
+            gravity = Gravity.CENTER
+            maxLines = 1
+            setAutoSizeTextTypeUniformWithConfiguration(16, 24, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        // Match the leading control's width so the title shares the dial's centre line.
+        utilities.addView(View(this@MainActivity).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dp(utilityWidth), 1))
+        addView(utilities, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        if (demoMode) addView(label(getString(com.binteum.app.R.string.ui_text_016), 20f).apply {
+            gravity = Gravity.CENTER; setTextColor(palette.warning)
+        }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        socLabel = label("", 26f, true).apply { gravity = Gravity.CENTER }.also {
+            addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(20) })
         }
-        addView(timeSummary, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
-        if (compact) addView(button(if (chargeControlsExpanded) "목표·시간 접기" else "목표·시간 설정") {
-            chargeControlsExpanded = !chargeControlsExpanded; render()
-        }.apply { withIcon(AppIcon.SETTINGS) })
-        if (!compact || chargeControlsExpanded) {
-            addView(label("알림 목표", 24f, true))
-            val targets = if (largeText) column() else row()
-            listOf(70, 80, 90).forEach { value ->
-                targets.addView(button("$value%", target == value, safeToConfigure()) {
-                    if (safeToConfigure() && value != target) {
-                        target = value; session = ChargingSession(target); persistTarget()
-                        snapshot?.let(::acceptSnapshot); render()
+        val choosing = reminderStart == 0L
+        modeToggle = null
+        if (choosing) {
+            modeToggle = ReminderModeToggle(this@MainActivity, palette, targetMode) { mode ->
+                if (safeToConfigure() && reminderStart == 0L) {
+                    targetMode = mode
+                    prefs.edit().putBoolean("targetMode", mode).apply()
+                    session = ChargingSession(target, targetEnabled = false)
+                    persistTarget()
+                    reminderDial?.configure(if (mode) target else windowMinutes, 1, if (mode) 100 else 120,
+                        if (mode) "%" else getString(com.binteum.app.R.string.ui_text_017), palette, true)
+                    if (android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                        reminderDial?.animate()?.cancel()
+                        reminderDial?.alpha = .55f
+                        reminderDial?.animate()?.alpha(1f)?.setDuration(220)?.start()
                     }
-                }, (if (largeText) LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f)).apply {
-                    setMargins(dp(3), dp(3), dp(3), dp(3))
-                })
-            }
-            addView(targets)
-            addView(label("사용할 시간", 24f, true).apply { setPadding(0, dp(24), 0, dp(10)) })
-            (if (largeText) listOf(listOf(8), listOf(20), listOf(40), listOf(60)) else listOf(listOf(8, 20), listOf(40, 60))).forEach { pair ->
-                val times = row()
-                pair.forEach { minutes ->
-                    times.addView(button("${minutes}분", windowMinutes == minutes, allowed() && windowEndElapsed == 0L) {
-                        if (!allowed() || windowEndElapsed != 0L) return@button
-                        windowMinutes = minutes; prefs.edit().putInt("windowMinutes", minutes).apply(); render()
-                    }.also { timeButtons.add(it) }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), dp(4), dp(3), dp(4)) })
+                    updateLabels()
                 }
-                addView(times)
+            }.also { addView(it, LinearLayout.LayoutParams(-1, dp((68 * resources.configuration.fontScale.coerceAtLeast(1f)).toInt())).apply { bottomMargin = dp(20) }) }
+        }
+        reminderDial = ReminderDialView(this@MainActivity).apply {
+            configure(if (targetMode) target else windowMinutes, 1, if (targetMode) 100 else 120,
+                if (targetMode) "%" else getString(com.binteum.app.R.string.ui_text_017), palette, choosing && safeToConfigure())
+            onValueChanged = { value ->
+                if (targetMode) target = value else windowMinutes = value
+                prefs.edit().putInt(if (targetMode) "target" else "windowMinutes", value).apply()
             }
-            addView(label("선택한 시간이며 충전 완료 예상시간은 아니에요.", 22f).apply { setTextColor(muted) })
+        }.also { addView(it, LinearLayout.LayoutParams(-1, dp(if (compact) 250 else 280))) }
+        reminderSubtitle = label("", 24f).apply { gravity = Gravity.CENTER; setTextColor(muted) }.also { addView(it) }
+        confirmReminder = button(if (choosing) getString(com.binteum.app.R.string.ui_text_018) else getString(com.binteum.app.R.string.ui_text_019), true, safeToConfigure()) {
+            if (!safeToConfigure()) return@button
+            if (reminderStart > 0) resetWaitingWindow() else confirmReminder()
+        }.also { addView(it) }
+        statusLabel = label("", 21f).apply { gravity = Gravity.CENTER; setTextColor(muted) }.also { addView(it) }
+        if (!compact || tab == 2) {
+            if (!compact) addView(View(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
+            addView(buildPanelActionButton())
         }
-        if (status == SessionStatus.TARGET_REACHED || status == SessionStatus.INTERRUPTED) {
-            addView(button("새 충전 세션", false, safeToConfigure()) {
-                if (safeToConfigure()) {
-                    interruptActivity("새 충전 세션을 시작했어요.")
-                    recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
-                    session = ChargingSession(target); persistTarget(); saveCheckpoint()
-                    snapshot?.let(::acceptSnapshot); render()
-                }
-            }.apply { withIcon(AppIcon.RESET) })
-        }
-        resetWindowButton = button("대기시간 다시 설정", false, allowed()) {
-            resetWaitingWindow()
-        }.apply { withIcon(AppIcon.RESET) }.also { addView(it) }
+    }
+
+    private fun confirmReminder() {
+        if (!safeToConfigure() || snapshot?.charging != true) return
+        media.pauseForHost(); active = null; recovery = null; completed = null
+        reminderStart = SystemClock.elapsedRealtime(); reminderFinish = 0L
+        windowEndElapsed = if (targetMode) 0 else reminderStart + windowMinutes * 60_000L
+        windowEndWall = if (targetMode) 0 else System.currentTimeMillis() + windowMinutes * 60_000L
+        session = ChargingSession(target, targetEnabled = targetMode)
+        message = ""; lastWindowHasBudget = true
+        prefs.edit().putBoolean("targetMode", targetMode).putInt("windowMinutes", windowMinutes).apply()
+        persistTarget(); saveCheckpoint(); snapshot?.let(::acceptSnapshot); render()
     }
 
     private fun resetWaitingWindow(minutes: Int? = null) {
-        if (!allowed()) return
-        media.pauseForHost()
-        interruptActivity(if (minutes == null) "새 대기시간을 선택해 주세요." else "${minutes}분에 맞는 활동을 골라 보세요.")
-        recovery = null; completed = null; windowEndElapsed = 0; windowEndWall = 0
-        if (minutes != null && minutes in listOf(8, 20, 40, 60)) {
-            windowMinutes = minutes
-            prefs.edit().putInt("windowMinutes", minutes).apply()
-        }
-        chargeControlsExpanded = minutes == null
-        lastWindowHasBudget = true
-        saveCheckpoint(); render()
+        if (!safeToConfigure()) return
+        media.pauseForHost(); active = null; recovery = null; completed = null
+        reminderStart = 0; reminderFinish = 0; windowEndElapsed = 0; windowEndWall = 0
+        if (minutes != null) windowMinutes = minutes.coerceIn(1, 120)
+        session = ChargingSession(target, targetEnabled = false)
+        message = ""; lastWindowHasBudget = true
+        persistTarget(); saveCheckpoint(); snapshot?.let(::acceptSnapshot); render()
     }
 
     private fun buildRight(): LinearLayout = column().apply {
-        setPadding(dp(32), dp(24), dp(16), dp(28))
+        setPadding(dp(if (panelOnRight) 16 else 32), dp(24), dp(if (panelOnRight) 32 else 16), dp(28))
         when (tab) {
-            1 -> {
-                addView(sectionTitle("미디어", AppIcon.PLAY))
-                addView(label("보고, 쉬고, 다시 출발.", 40f, true))
-                addView(label("잠깐의 여유에 어울리는 콘텐츠", 24f).apply { setTextColor(muted) })
-                addView(space(16))
-                when {
-                    !allowed() -> buildBlockedState(this)
-                    remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS -> buildWaitingWindowEnd(this)
-                    else -> addView(media)
-                }
-            }
             2 -> buildSettings(this)
             else -> {
-                addView(sectionTitle("대시보드", AppIcon.DASHBOARD))
-                addView(label(if (active != null) "지금은, 나에게 집중." else "잠깐의 충전, 충분한 여유.", 40f, true))
                 val showingEndState = allowed() && remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS &&
                     active == null && recovery == null && completed == null
-                if (message.isNotBlank() && !showingEndState) addView(label(message, 24f).apply { setTextColor(muted) })
+                if (message.isNotBlank() && !showingEndState && reminderFinish == 0L) addView(label(message, 24f).apply { setTextColor(muted) })
                 addView(space(12))
                 when {
+                    reminderFinish > 0 -> addView(label(if (targetMode) getString(R.string.target_reached_percent, target) else getString(com.binteum.app.R.string.ui_text_001), 30f, true))
+                    reminderStart == 0L && status == SessionStatus.CHARGING -> {
+                        addView(label(getString(com.binteum.app.R.string.ui_text_020), 30f, true))
+                        addView(label(getString(com.binteum.app.R.string.ui_text_021), 24f).apply { setTextColor(muted) })
+                    }
                     !allowed() -> buildBlockedState(this)
                     recovery != null -> {
-                        addView(label("이전 활동이 남아 있어요", 30f, true))
-                        addView(label("남은 시간을 확인한 뒤 직접 이어가 주세요. 자동으로 다시 시작하지 않아요.", 24f))
-                        addView(button("남은 시간으로 이어하기", true) { resumeActivity() })
-                        addView(button("이전 활동 끝내기") { recovery = null; saveCheckpoint(); render() })
+                        addView(label(getString(com.binteum.app.R.string.ui_text_022), 30f, true))
+                        addView(label(getString(com.binteum.app.R.string.ui_text_023), 24f))
+                        addView(button(getString(com.binteum.app.R.string.ui_text_024), true) { resumeActivity() })
+                        addView(button(getString(com.binteum.app.R.string.ui_text_025)) { recovery = null; saveCheckpoint(); render() })
                     }
                     active != null -> buildActive(this, active!!)
                     completed != null -> buildFeedback(this, completed!!)
@@ -495,7 +605,7 @@ class MainActivity : Activity() {
         if (askedBefore && !shouldShowRequestPermissionRationale("android.car.permission.CAR_ENERGY")) {
             runCatching {
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-            }.onFailure { message = "앱 설정을 열 수 없어요. 차량 설정에서 빈틈의실의 권한을 확인해 주세요."; render() }
+            }.onFailure { message = getString(com.binteum.app.R.string.ui_text_026); render() }
         } else {
             prefs.edit().putBoolean("askedEnergyPermission", true).apply()
             requestPermissions(arrayOf("android.car.permission.CAR_ENERGY"), 700)
@@ -505,7 +615,7 @@ class MainActivity : Activity() {
     private fun reconnectVehicle() {
         if (demoMode) return
         media.pauseForHost()
-        interruptActivity("차량 연결을 다시 확인하고 있어요.")
+        interruptActivity(getString(com.binteum.app.R.string.ui_text_027))
         recovery = null
         source.stop()
         snapshot = null; status = SessionStatus.WAITING_FOR_DATA
@@ -516,115 +626,165 @@ class MainActivity : Activity() {
 
     private fun buildBlockedState(container: LinearLayout) {
         val parent = surfaceCard()
-        parent.addView(sectionTitle("연결 상태", AppIcon.SHIELD))
+        parent.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_028), AppIcon.SHIELD))
         container.addView(parent)
         val missingPermission = !demoMode && !hasEnergyPermission() && status == SessionStatus.WAITING_FOR_DATA
         val heading = when {
-            missingPermission -> "충전 상태를 읽을 수 있도록 허용해 주세요"
-            status == SessionStatus.TARGET_REACHED -> "설정한 목표 잔량에 도달했어요"
-            status == SessionStatus.INTERRUPTED -> "충전이 진행되고 있지 않아요"
+            missingPermission -> getString(com.binteum.app.R.string.ui_text_029)
+            status == SessionStatus.TARGET_REACHED -> getString(com.binteum.app.R.string.ui_text_030)
+            status == SessionStatus.INTERRUPTED -> getString(com.binteum.app.R.string.ui_text_031)
             else -> statusText()
         }
         val description = when {
-            missingPermission -> "배터리 잔량과 실제 충전 상태는 별도로 확인해요.\n아래 버튼에서 충전 상태 읽기를 허용하면 연결을 다시 확인합니다."
-            status == SessionStatus.TARGET_REACHED -> "이번 세션의 ${target}% 목표에 도달했어요. 다음 충전을 시작할 때 새 세션을 열어 주세요."
-            status == SessionStatus.INTERRUPTED -> "충전기 연결과 충전 시작 여부를 확인해 주세요. 충전 상태가 확인되면 활동을 열어요."
-            status == SessionStatus.DRIVING_LOCKED -> "안전하게 정차하고 차량의 화면 사용 제한이 해제되면 다시 이용할 수 있어요."
-            status == SessionStatus.SUSPENDED -> "화면이 다시 활성화되면 최신 차량 상태를 확인할게요."
-            else -> "차량 데이터가 아직 준비되지 않았어요. 잠시 기다리거나 연결을 다시 확인해 주세요."
+            missingPermission -> getString(com.binteum.app.R.string.ui_text_032)
+            status == SessionStatus.TARGET_REACHED -> getString(R.string.target_session_complete, target)
+            status == SessionStatus.INTERRUPTED -> getString(com.binteum.app.R.string.ui_text_033)
+            status == SessionStatus.DRIVING_LOCKED -> getString(com.binteum.app.R.string.ui_text_034)
+            status == SessionStatus.SUSPENDED -> getString(com.binteum.app.R.string.ui_text_035)
+            else -> getString(com.binteum.app.R.string.ui_text_036)
         }
         parent.addView(label(heading, 32f, true))
         parent.addView(label(description, 25f))
-        if (missingPermission) parent.addView(button("충전 상태 읽기 허용", true) { requestEnergyPermission() })
+        if (missingPermission) parent.addView(button(getString(com.binteum.app.R.string.ui_text_037), true) { requestEnergyPermission() })
         if (!demoMode && status in listOf(SessionStatus.WAITING_FOR_DATA, SessionStatus.INTERRUPTED)) {
-            if (!missingPermission) parent.addView(button("차량 연결 다시 확인") { reconnectVehicle() })
+            if (!missingPermission) parent.addView(button(getString(com.binteum.app.R.string.ui_text_038)) { reconnectVehicle() })
             val value = snapshot
-            parent.addView(label("배터리 잔량 ${if (value?.stateOfCharge != null) "확인됨" else "확인 중"} · " +
-                "충전 상태 ${if (value?.charging != null) "확인됨" else "확인 중"} · " +
-                "화면 제한 ${if (value?.uxRestricted != null) "확인됨" else "확인 중"}", 23f))
+            fun available(present: Boolean) = getString(if (present) R.string.ui_text_039 else R.string.ui_text_040)
+            parent.addView(label(getString(R.string.vehicle_checks, available(value?.stateOfCharge != null),
+                available(value?.charging != null), available(value?.uxRestricted != null)), 23f))
         }
         if (BuildConfig.DEBUG && !demoMode && status != SessionStatus.DRIVING_LOCKED && status != SessionStatus.SUSPENDED) {
-            parent.addView(button("개발용 모의 충전으로 둘러보기") { switchSource() })
+            parent.addView(button(getString(com.binteum.app.R.string.ui_text_041)) { switchSource() })
         }
-        parent.addView(label("목표 알림은 차량의 충전을 제어하지 않아요.", 23f))
+        parent.addView(label(getString(com.binteum.app.R.string.ui_text_042), 23f))
+    }
+
+    private fun navigateTo(destination: Int) {
+        if (tab == destination) return
+        media.pauseForHost()
+        if (active != null && destination != 0) interruptActivity(getString(com.binteum.app.R.string.ui_text_043))
+        tab = destination
+        render()
+    }
+
+    private fun maybeShowEnergyIntroduction() {
+        if (demoMode || hasEnergyPermission() || !safeToConfigure() ||
+            prefs.getBoolean("energyIntroductionSeen", false) || transientDialog?.isShowing == true) return
+        prefs.edit().putBoolean("energyIntroductionSeen", true).apply()
+        transientDialog = AlertDialog.Builder(this, dialogTheme())
+            .setTitle(getString(com.binteum.app.R.string.ui_text_044))
+            .setMessage(getString(com.binteum.app.R.string.ui_text_045))
+            .setPositiveButton(getString(com.binteum.app.R.string.ui_text_046)) { _, _ -> if (safeToConfigure()) requestEnergyPermission() }
+            .setNegativeButton(getString(com.binteum.app.R.string.ui_text_047)) { _, _ -> render() }
+            .show()
+    }
+
+    private fun dialogTheme() = if (palette.dark) android.R.style.Theme_Material_Dialog_Alert
+        else android.R.style.Theme_Material_Light_Dialog_Alert
+
+    private fun showMoodPicker() {
+        if (!allowed() || remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS) return
+        transientDialog = AlertDialog.Builder(this, dialogTheme())
+            .setTitle(getString(com.binteum.app.R.string.ui_text_048))
+            .setItems(arrayOf(getString(com.binteum.app.R.string.ui_text_049), getString(com.binteum.app.R.string.ui_text_050), getString(com.binteum.app.R.string.ui_text_051))) { _, index ->
+                if (allowed() && remainingWindowSeconds() > ActivityRecommender.DEFAULT_RESERVE_SECONDS) {
+                    val mood = listOf(getString(com.binteum.app.R.string.ui_text_049), getString(com.binteum.app.R.string.ui_text_050), getString(com.binteum.app.R.string.ui_text_051))[index]
+                    prefs.edit().putString("lastMood", mood).putString("moodDate", java.time.LocalDate.now().toString()).apply()
+                    render(preserveScroll = true)
+                }
+            }
+            .setNeutralButton(getString(com.binteum.app.R.string.ui_text_052)) { _, _ ->
+                if (allowed()) { prefs.edit().remove("lastMood").remove("moodDate").apply(); render(preserveScroll = true) }
+            }
+            .setNegativeButton(getString(com.binteum.app.R.string.ui_text_053), null).show()
+    }
+
+    private fun feedCard(title: String, detail: String, art: Int, enabled: Boolean = true, action: () -> Unit) = column().apply {
+        setPadding(dp(20), dp(20), dp(20), dp(20))
+        background = rounded(palette.surface, 28, palette.border)
+        addView(WellnessArtView(this@MainActivity).apply { kind = art }, LinearLayout.LayoutParams(-1, dp(100)))
+        addView(label(title, 28f, true))
+        addView(label(detail, 22f).apply { setTextColor(muted) })
+        isEnabled = enabled; alpha = if (enabled) 1f else 0.5f
+        isClickable = true; isFocusable = true
+        contentDescription = "$title, $detail${if (enabled) "" else getString(com.binteum.app.R.string.ui_text_054)}"
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        foreground = RippleDrawable(ColorStateList.valueOf(0x30FFFFFF), null, rounded(android.graphics.Color.WHITE, 28))
+        setOnClickListener { if (enabled) action() }
     }
 
     private fun buildRecommendations(parent: LinearLayout) {
-        val profile = loadProfile(bucket()).let { if (learningOn) it else it.copy(feedback = emptyMap()) }
-        val choices = ActivityRecommender.recommend(remainingWindowSeconds(), status, profile)
-        if (choices.isEmpty()) {
-            buildWaitingWindowEnd(parent)
-            return
+        if (remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS) {
+            buildWaitingWindowEnd(parent); return
         }
-        parent.addView(label("남은 시간에 맞춘 추천", 26f, true))
-        parent.addView(label("한 가지를 골라 가볍게 시작해 보세요.", 24f).apply { setTextColor(muted) })
-        val width = resources.configuration.screenWidthDp
-        val contentWidth = if (width >= 1100) width - (if (width >= 1500) 350 else 320) - 80 else width - 80
-        val columns = when { contentWidth >= 1000 -> 3; contentWidth >= 660 -> 2; else -> 1 }
-        choices.chunked(columns).forEachIndexed { rowIndex, choicesRow ->
-            val cards = row()
-            choicesRow.forEachIndexed { index, choice ->
-                val featured = rowIndex == 0 && index == 0
-                val color = if (featured) palette.onAccent else ink
-                val glyph = activityIcon(choice.activity.kind)
-                val card = column().apply {
-                    setPadding(dp(24), dp(24), dp(24), dp(24))
-                    minimumHeight = dp(324)
-                    background = rounded(if (featured) palette.accent else palette.surface, 26)
-                    val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
-                    heading.addView(icon(glyph, color, 34), LinearLayout.LayoutParams(dp(46), dp(46)))
-                    heading.addView(label("${choice.activity.durationSeconds / 60}분", 24f, true).apply {
-                        setTextColor(color); gravity = Gravity.END
-                    }, LinearLayout.LayoutParams(0, -2, 1f))
-                    addView(heading)
-                    addView(space(16))
-                    addView(label(choice.activity.title.substringAfter("분 "), 30f, true).apply { setTextColor(color) })
-                    val shortDescription = when (choice.activity.kind) {
-                        ActivityKind.REST -> "화면에서 눈을 떼고\n잠시 편안하게 쉬어요."
-                        ActivityKind.REFLECTION -> "복잡한 생각을 정리하고\n다음 한 걸음을 골라요."
-                        ActivityKind.QUIZ -> "다섯 문제로 가볍게\n머리를 깨워 보세요."
-                    }
-                    addView(label(shortDescription, 24f).apply { setTextColor(if (featured) color else muted) },
-                        LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(4); bottomMargin = dp(20) })
-                    addView(button("시작하기", !featured) { startActivity(choice.activity) }.apply {
-                        withIcon(AppIcon.ARROW_RIGHT, if (!featured) palette.onAccent else ink)
-                        contentDescription = "${choice.activity.title} 시작하기"
-                    })
-                }
-                cards.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(6), dp(8), dp(6), dp(8)) })
-            }
-            repeat(columns - choicesRow.size) {
-                cards.addView(View(this), LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(6), dp(8), dp(6), dp(8)) })
-            }
-            parent.addView(cards, LinearLayout.LayoutParams(-1, -2))
+        parent.addView(media)
+        parent.addView(space(20))
+        parent.addView(surfaceCard().apply {
+            val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
+            heading.addView(label("N", 40f, true).apply { setTextColor(0xFFE50914.toInt()); setPadding(0, 0, dp(20), 0) })
+            heading.addView(label("Netflix", 30f, true), LinearLayout.LayoutParams(0, -2, 1f))
+            heading.addView(icon(AppIcon.CHEVRON_RIGHT, ink, 26), LinearLayout.LayoutParams(dp(32), dp(32)))
+            addView(heading)
+            addView(label(getString(R.string.netflix_external), 23f).apply { setTextColor(muted) })
+            addView(label(getString(R.string.netflix_external_detail), 20f).apply { setTextColor(muted) })
+            isClickable = true; isFocusable = true
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            contentDescription = getString(R.string.netflix_external_accessibility)
+            foreground = RippleDrawable(ColorStateList.valueOf(0x30FFFFFF), null, rounded(android.graphics.Color.WHITE, 28))
+            setOnClickListener { openNetflix() }
+        })
+    }
+
+    private fun openNetflix() {
+        if (!allowed() || remainingWindowSeconds() <= ActivityRecommender.DEFAULT_RESERVE_SECONDS) return
+        media.pauseForHost()
+        val uri = Uri.parse("https://www.netflix.com/")
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                setPackage("com.netflix.mediaclient")
+            })
+        } catch (_: android.content.ActivityNotFoundException) {
+            openNetflixWeb(uri)
+        } catch (_: SecurityException) {
+            openNetflixWeb(uri)
         }
-        parent.addView(space(16))
-        parent.addView(sectionTitle("언제든 멈춰도 괜찮아요", AppIcon.SHIELD))
-        parent.addView(label("활동 뒤에는 마무리할 여유를 남겨둘게요.", 23f).apply { setTextColor(muted) })
+    }
+
+    private fun openNetflixWeb(uri: Uri) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (_: android.content.ActivityNotFoundException) {
+            android.widget.Toast.makeText(this, R.string.netflix_unavailable, android.widget.Toast.LENGTH_LONG).show()
+        } catch (_: SecurityException) {
+            android.widget.Toast.makeText(this, R.string.netflix_unavailable, android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun buildWaitingWindowEnd(parent: LinearLayout) {
         val remaining = remainingWindowSeconds()
         parent.addView(surfaceCard().apply {
-            addView(sectionTitle("대기시간", AppIcon.CLOCK))
-            addView(label(if (remaining == 0) "이번 대기시간이 끝났어요." else "잠시 마무리할 시간이에요.", 34f, true))
-            addView(label(if (remaining == 0) "더 머무를 예정이라면 새 시간을 선택해 주세요."
-                else "새 활동을 시작하기에는 남은 시간이 짧아요. 더 기다린다면 시간을 다시 정할 수 있어요.", 24f).apply { setTextColor(muted) })
+            addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_055), AppIcon.CLOCK))
+            addView(label(if (remaining == 0) getString(com.binteum.app.R.string.ui_text_001) else getString(com.binteum.app.R.string.ui_text_056), 34f, true))
+            addView(label(if (remaining == 0) getString(com.binteum.app.R.string.ui_text_057)
+                else getString(com.binteum.app.R.string.ui_text_058), 24f).apply { setTextColor(muted) })
             addView(space(16))
-            addView(button("${windowMinutes}분 대기시간 새로 설정", true, allowed()) {
+            addView(button(getString(R.string.reset_minutes, windowMinutes), true, allowed()) {
                 resetWaitingWindow(windowMinutes)
             }.apply { withIcon(AppIcon.RESET, palette.onAccent) })
-            addView(button("다른 시간 선택", false, allowed()) { resetWaitingWindow() }.apply { withIcon(AppIcon.CLOCK) })
-            addView(label("새 시간을 정해도 차량의 충전 설정은 바뀌지 않아요.", 22f).apply { setTextColor(muted) })
+            addView(button(getString(com.binteum.app.R.string.ui_text_059), false, allowed()) { resetWaitingWindow() }.apply { withIcon(AppIcon.CLOCK) })
+            addView(label(getString(com.binteum.app.R.string.ui_text_060), 22f).apply { setTextColor(muted) })
         })
     }
 
     private fun startActivity(activity: OwnActivity) {
-        if (!allowed() || ActivityRecommender.recommend(remainingWindowSeconds(), status).none { it.activity.id == activity.id }) return
+        if (!allowed() || !ActivityCatalog.canStart(activity.id, remainingWindowSeconds(), status)) return
+        media.pauseForHost()
         startWindowIfNeeded()
         active = Run(activity.id, UUID.randomUUID().toString(), SystemClock.elapsedRealtime(), System.currentTimeMillis(), bucket())
         completed = null; quizIndex = 0; quizAnswer = null
-        message = "언제든 중단할 수 있어요. 중단은 취향 평가에 반영하지 않아요."
+        message = ""
         saveCheckpoint(); render()
     }
 
@@ -633,7 +793,7 @@ class MainActivity : Activity() {
         container.addView(parent)
         val activity = ActivityCatalog.find(run.activityId) ?: return
         parent.addView(label(activity.title, 32f, true))
-        parent.addView(sectionTitle("남은 활동 시간", AppIcon.CLOCK))
+        parent.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_061), AppIcon.CLOCK))
         timerLabel = label(clock(remainingActivitySeconds(run)), 64f, true).also { parent.addView(it) }
         if (activity.kind == ActivityKind.QUIZ && quizIndex < activity.quizQuestions.size) {
             val question = activity.quizQuestions[quizIndex]
@@ -642,108 +802,254 @@ class MainActivity : Activity() {
                 if (allowed() && quizAnswer == null) { quizAnswer = index; render() }
             }) }
             quizAnswer?.let { chosen ->
-                parent.addView(label((if (chosen == question.correctAnswerIndex) "맞았어요. " else "괜찮아요. ") + question.explanation, 25f))
-                parent.addView(button("다음 문제", true) { if (allowed()) { quizIndex++; quizAnswer = null; saveCheckpoint(); render() } })
+                parent.addView(label((if (chosen == question.correctAnswerIndex) getString(com.binteum.app.R.string.ui_text_062) else getString(com.binteum.app.R.string.ui_text_063)) + question.explanation, 25f))
+                parent.addView(button(getString(com.binteum.app.R.string.ui_text_064), true) { if (allowed()) { quizIndex++; quizAnswer = null; saveCheckpoint(); render() } })
             }
         } else activity.instructions.forEach { parent.addView(label("• $it", 26f)) }
-        parent.addView(button("활동 완료", true) {
-            if (allowed()) { completed = active; active = null; message = "수고했어요. 평가는 선택이에요."; saveCheckpoint(); render() }
+        parent.addView(button(getString(com.binteum.app.R.string.ui_text_065), true) {
+            if (allowed()) { completed = active; active = null; message = ""; saveCheckpoint(); render() }
         })
-        parent.addView(button("중단하고 다른 활동 보기") { interruptActivity("활동을 중단했어요. 취향에는 반영하지 않아요."); render() })
+        parent.addView(button(getString(com.binteum.app.R.string.ui_text_066)) { interruptActivity(getString(com.binteum.app.R.string.ui_text_067)); render() })
     }
 
     private fun buildFeedback(container: LinearLayout, run: Run) {
         val parent = surfaceCard()
-        parent.addView(sectionTitle("나의 취향", AppIcon.SPARKLES))
+        parent.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_068), AppIcon.SPARKLES))
         container.addView(parent)
-        parent.addView(label("어떤 시간이었나요?", 32f, true))
-        parent.addView(label("내용에 대한 평가만 다음 같은 시간 구간의 추천에 반영해요.", 24f))
-        listOf("좋았어요" to ActivityRating.LIKE, "내용이 아쉬웠어요" to ActivityRating.DISLIKE).forEach { (title, rating) ->
+        parent.addView(label(getString(com.binteum.app.R.string.ui_text_069), 32f, true))
+        parent.addView(label(getString(com.binteum.app.R.string.ui_text_070), 24f))
+        listOf(getString(com.binteum.app.R.string.ui_text_071) to ActivityRating.LIKE, getString(com.binteum.app.R.string.ui_text_072) to ActivityRating.DISLIKE).forEach { (title, rating) ->
             parent.addView(button(title, rating == ActivityRating.LIKE, learningOn && allowed()) {
                 if (allowed() && learningOn) {
                     val result = ActivityFeedbackReducer.apply(loadProfile(run.bucket), OwnActivityFeedback(
                         "rating-${run.attemptId}", run.attemptId, run.activityId, rating, true))
                     saveProfile(run.bucket, result.profile); completed = null
-                    message = if (result.applied) "이 시간 구간의 취향에 반영했어요." else "이미 반영한 평가예요."
+                    message = if (result.applied) getString(com.binteum.app.R.string.ui_text_073) else getString(com.binteum.app.R.string.ui_text_074)
                     render()
                 }
             })
         }
-        if (!learningOn) parent.addView(label("취향 학습이 꺼져 있어 평가를 저장하지 않아요.", 24f))
-        parent.addView(button("평가 없이 돌아가기") { completed = null; render() })
+        if (!learningOn) parent.addView(label(getString(com.binteum.app.R.string.ui_text_075), 24f))
+        parent.addView(button(getString(com.binteum.app.R.string.ui_text_076)) { completed = null; render() })
     }
 
     private fun buildSettings(parent: LinearLayout) {
-        parent.addView(sectionTitle("설정", AppIcon.SETTINGS))
-        parent.addView(label("나에게 편안한 방식으로.", 40f, true))
-        parent.addView(label("화면과 취향을 이 기기에 맞춰 보세요.", 24f).apply { setTextColor(muted) })
-        parent.addView(space(16))
-        val appearance = surfaceCard()
-        appearance.addView(sectionTitle("화면 모드", AppIcon.SUN))
-        appearance.addView(label("시스템 설정을 따르거나 직접 선택하세요.", 23f).apply { setTextColor(muted) })
-        val modes = if (resources.configuration.screenWidthDp < 650) column() else row()
-        listOf(ThemeMode.SYSTEM to ("자동" to AppIcon.SYSTEM), ThemeMode.LIGHT to ("라이트" to AppIcon.SUN),
-            ThemeMode.DARK to ("다크" to AppIcon.MOON)).forEach { (mode, item) ->
-            val (name, glyph) = item
-            modes.addView(button(name, mode == themeMode) { changeTheme(mode) }.apply {
-                withIcon(glyph, if (mode == themeMode) palette.onAccent else ink)
-                contentDescription = "$name 화면 모드${if (mode == themeMode) ", 선택됨" else ""}"
-                isSelected = mode == themeMode
-            }, if (modes.orientation == LinearLayout.HORIZONTAL) LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
-                else LinearLayout.LayoutParams(-1, -2))
-        }
-        appearance.addView(modes); parent.addView(appearance)
-        val preferences = surfaceCard()
-        preferences.addView(sectionTitle("좋아하는 시간", AppIcon.SPARKLES))
-        preferences.addView(label("${windowMinutes}분 대기할 때 선호하는 활동 · 여러 개 선택 가능", 23f).apply { setTextColor(muted) })
-        val profile = loadProfile(bucket())
-        ActivityKind.values().forEach { kind ->
-            val name = when (kind) { ActivityKind.REST -> "눈 쉬기"; ActivityKind.REFLECTION -> "생각 정리"; ActivityKind.QUIZ -> "가벼운 퀴즈" }
-            val selected = kind in profile.preferredKinds
-            preferences.addView(button(if (selected) "$name · 선택됨" else name, selected, allowed()) {
-                if (!allowed()) return@button
-                val kinds = profile.preferredKinds.toMutableSet()
-                if (!kinds.add(kind)) kinds.remove(kind)
-                saveProfile(bucket(), profile.copy(preferredKinds = kinds)); render()
-            }.apply { withIcon(activityIcon(kind), if (selected) palette.onAccent else ink) })
-        }
-        preferences.addView(button("취향 기억하기 · ${if (learningOn) "켜짐" else "꺼짐"}", learningOn, allowed()) {
-            if (!allowed()) return@button
-            learningOn = !learningOn; prefs.edit().putBoolean("learningOn", learningOn).apply(); render()
-        }.apply { withIcon(AppIcon.CHECK, if (learningOn) palette.onAccent else ink) })
-        preferences.addView(label("자체 활동에 남긴 평가만 이 기기에 저장해요.", 22f).apply { setTextColor(muted) })
-        preferences.addView(button("이 시간 구간의 기록 초기화", false, allowed()) {
-            if (!allowed()) return@button
-            saveProfile(bucket(), ActivityProfile(preferredKinds = profile.preferredKinds))
-            completed = null; message = "이 구간의 학습 기록을 지웠어요."; render()
-        }.apply { withIcon(AppIcon.RESET) })
-        if (!allowed()) preferences.addView(label("차량 상태를 확인한 뒤 취향을 바꿀 수 있어요.", 23f).apply { setTextColor(muted) })
-        parent.addView(preferences)
+        parent.addView(label(getString(com.binteum.app.R.string.ui_text_014), 34f, true))
+        parent.addView(space(12))
+        val display = surfaceCard()
+        display.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_077), AppIcon.SYSTEM))
+        val themeNames = listOf(getString(com.binteum.app.R.string.ui_text_078), getString(com.binteum.app.R.string.ui_text_079), getString(com.binteum.app.R.string.ui_text_080))
+        display.addView(settingRow(getString(com.binteum.app.R.string.ui_text_081), getString(com.binteum.app.R.string.ui_text_082),
+            themeNames[themeMode.ordinal]) {
+            chooseSetting(getString(com.binteum.app.R.string.ui_text_081), themeNames, themeMode.ordinal) { changeTheme(ThemeMode.values()[it]) }
+        })
+        display.addView(settingRow(getString(com.binteum.app.R.string.ui_text_083), getString(com.binteum.app.R.string.ui_text_084),
+            if (panelOnRight) getString(com.binteum.app.R.string.ui_text_085) else getString(com.binteum.app.R.string.ui_text_086)) {
+            chooseSetting(getString(com.binteum.app.R.string.ui_text_083), listOf(getString(com.binteum.app.R.string.ui_text_086), getString(com.binteum.app.R.string.ui_text_085)), if (panelOnRight) 1 else 0) {
+                movePanel(it == 1)
+            }
+        })
+        val sizeLabels = listOf(R.string.text_small, R.string.text_default, R.string.text_large, R.string.text_largest).map { getString(it) }
+        val sizes = listOf(.85f, 1f, 1.15f, 1.3f)
+        val currentSize = sizes.indexOf(prefs.getFloat("textScale", 1f)).coerceAtLeast(0)
+        display.addView(settingRow(getString(R.string.text_size), getString(R.string.text_size_detail), sizeLabels[currentSize]) {
+            chooseSetting(getString(R.string.text_size), sizeLabels, currentSize) {
+                if (it != currentSize) changeReadingPreference("textScale", scale = sizes[it])
+            }
+        })
+        val languages = listOf("한국어", "English")
+        val languageIndex = if (prefs.getString("language", "ko") == "en") 1 else 0
+        display.addView(settingRow(getString(R.string.language), getString(R.string.language_detail), languages[languageIndex]) {
+            chooseSetting(getString(R.string.language), languages, languageIndex) {
+                if (it != languageIndex) changeReadingPreference("language", language = if (it == 1) "en" else "ko")
+            }
+        })
+        parent.addView(display)
+        val voice = surfaceCard()
+        voice.addView(sectionTitle(getString(R.string.voice_heading), AppIcon.INFO))
+        voice.addView(settingSwitch(getString(R.string.voice_enabled), getString(R.string.voice_detail), prefs.getBoolean("completionVoice", true)) {
+            prefs.edit().putBoolean("completionVoice", it).apply()
+            if (!it) completionVoice.stop()
+        })
+        voice.addView(settingRow(getString(R.string.voice_test), getString(R.string.voice_test_detail), getString(R.string.voice_play)) {
+            if (prefs.getBoolean("completionVoice", true) && safeToConfigure()) { media.pauseForHost(); announceCompletion() }
+            else android.widget.Toast.makeText(this, R.string.voice_test_blocked, android.widget.Toast.LENGTH_LONG).show()
+        })
+        parent.addView(voice)
+        val background = surfaceCard()
+        background.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_087), AppIcon.SUN))
+        background.addView(settingRow(getString(com.binteum.app.R.string.ui_text_088), getString(com.binteum.app.R.string.ui_text_089), backgroundTitle(backgroundMode)) {
+            val modes = BackgroundMode.values()
+            chooseSetting(getString(com.binteum.app.R.string.ui_text_088), modes.map { backgroundTitle(it) }, backgroundMode.ordinal) {
+                backgroundMode = modes[it]
+                prefs.edit().putString("backgroundMode", backgroundMode.name).apply()
+                render(preserveScroll = true)
+            }
+        })
+        background.addView(settingSwitch(getString(com.binteum.app.R.string.ui_text_090),
+            getString(if (backgroundMode.isFlat) R.string.background_motion_locked else R.string.ui_text_091),
+            backgroundMotion && !backgroundMode.isFlat, enabled = !backgroundMode.isFlat) {
+            backgroundMotion = it
+            prefs.edit().putBoolean("backgroundMotion", it).apply()
+            ambientBackground.configure(backgroundMode, palette.dark, backgroundMotion)
+        })
+        parent.addView(background)
         val connection = surfaceCard()
-        connection.addView(sectionTitle("차량 연결", AppIcon.SHIELD))
-        connection.addView(label(if (demoMode) "시연 중 · 실제 차량 데이터가 아니에요" else statusText(), 24f))
-        if (!demoMode && !hasEnergyPermission()) connection.addView(button("충전 상태 읽기 허용", true) { requestEnergyPermission() })
-        if (!demoMode) connection.addView(button("연결 다시 확인") { reconnectVehicle() }.apply { withIcon(AppIcon.RESET) })
+        connectionCard = connection
+        populateConnectionSettings(connection)
+        parent.addView(connection)
+    }
+
+    private fun refreshConnectionSettings(animate: Boolean = true) {
+        animateConnectionRefresh = animateConnectionRefresh || animate
+        handler.removeCallbacks(connectionRefresh)
+        handler.postDelayed(connectionRefresh, 60)
+    }
+
+    private fun populateConnectionSettings(connection: LinearLayout) {
+        diagnosticsLabel = null
+        connection.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_092), AppIcon.SHIELD))
+        connection.addView(label(if (demoMode) getString(com.binteum.app.R.string.ui_text_093) else statusText(), 26f, true))
+        connection.addView(label(getString(com.binteum.app.R.string.ui_text_094), 22f).apply { setTextColor(muted) })
+        if (!demoMode) {
+            connection.addView(settingRow(getString(com.binteum.app.R.string.ui_text_095), getString(com.binteum.app.R.string.ui_text_096),
+                if (hasEnergyPermission()) getString(com.binteum.app.R.string.ui_text_097) else getString(com.binteum.app.R.string.ui_text_098)) { requestEnergyPermission() })
+            connection.addView(settingRow(getString(com.binteum.app.R.string.ui_text_099), getString(com.binteum.app.R.string.ui_text_100), getString(com.binteum.app.R.string.ui_text_101)) { reconnectVehicle() })
+        }
         if (BuildConfig.DEBUG) {
-            connection.addView(button(if (developerOptionsExpanded) "개발용 설정 접기" else "개발용 설정 펼치기") {
-                developerOptionsExpanded = !developerOptionsExpanded; render()
-            }.apply { withIcon(AppIcon.SETTINGS) })
+            connection.addView(settingSwitch(getString(com.binteum.app.R.string.ui_text_016), getString(com.binteum.app.R.string.ui_text_102), demoMode) { switchSource() })
+            connection.addView(settingRow(getString(com.binteum.app.R.string.ui_text_103), getString(com.binteum.app.R.string.ui_text_104), if (developerOptionsExpanded) getString(com.binteum.app.R.string.ui_text_105) else getString(com.binteum.app.R.string.ui_text_106)) {
+                developerOptionsExpanded = !developerOptionsExpanded; refreshConnectionSettings()
+            })
             if (developerOptionsExpanded) {
-                if (!demoMode) diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).apply {
-                    setTextColor(muted)
-                }.also { connection.addView(it) }
-                connection.addView(button(if (demoMode) "실제 Pleos 연결로 전환" else "모의 충전 시연 켜기", demoMode) { switchSource() })
+                if (!demoMode) diagnosticsLabel = label((source as? PleosVehicleDataSource)?.diagnostics.orEmpty(), 22f).also { connection.addView(it) }
                 if (demoMode) {
-                    listOf("충전 중 65%", "목표 도달", "목표 전 충전 중단", "주행 제한", "데이터 지연").forEachIndexed { index, text ->
-                        connection.addView(button(text, demoScenario == index) {
-                            session = ChargingSession(target); persistTarget()
-                            demoScenario = index; prefs.edit().putInt("demoScenario", index).apply(); emitDemoScenario(); render()
-                        })
-                    }
+                    val scenarios = listOf(getString(com.binteum.app.R.string.ui_text_107), getString(com.binteum.app.R.string.ui_text_108), getString(com.binteum.app.R.string.ui_text_109), getString(com.binteum.app.R.string.ui_text_110), getString(com.binteum.app.R.string.ui_text_111))
+                    connection.addView(settingRow(getString(com.binteum.app.R.string.ui_text_112), getString(com.binteum.app.R.string.ui_text_113), scenarios[demoScenario]) {
+                        chooseSetting(getString(com.binteum.app.R.string.ui_text_112), scenarios, demoScenario) {
+                            session = ChargingSession(target, targetEnabled = targetMode && reminderStart > 0)
+                            persistTarget(); demoScenario = it
+                            prefs.edit().putInt("demoScenario", it).apply()
+                            emitDemoScenario(); refreshConnectionSettings()
+                        }
+                    })
                 }
             }
         }
-        parent.addView(connection)
+    }
+
+    private fun chooseSetting(title: String, choices: List<String>, selected: Int, onSelected: (Int) -> Unit) {
+        transientDialog?.dismiss()
+        val dialog = android.app.Dialog(this)
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val whiteSurface = palette.flat && !palette.dark
+        val panel = column().apply {
+            setPadding(dp(24), dp(20), dp(24), dp(24))
+            background = rounded(if (whiteSurface) 0xE6FFFFFF.toInt() else 0xC9000000.toInt(), 28, palette.border)
+        }
+        val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        heading.addView(label(title, 28f, true), LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(iconButton(getString(com.binteum.app.R.string.ui_text_114), AppIcon.CLOSE) { dialog.dismiss() }, LinearLayout.LayoutParams(dp(64), dp(64)))
+        panel.addView(heading)
+        panel.addView(space(12))
+        choices.forEachIndexed { index, name ->
+            val checked = index == selected
+            val option = row().apply {
+                gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(68)
+                setPadding(dp(20), dp(10), dp(16), dp(10))
+                background = rounded(if (whiteSurface) { if (checked) 0x22000000 else 0x09000000 }
+                    else if (checked) 0x80000000.toInt() else 0x33000000,
+                    18, if (checked) palette.textMuted else palette.border)
+                addView(label(name, 24f, checked), LinearLayout.LayoutParams(0, -2, 1f))
+                if (checked) addView(icon(AppIcon.CHECK, ink, 26), LinearLayout.LayoutParams(dp(32), dp(32)))
+                isClickable = true; isFocusable = true; isSelected = checked
+                contentDescription = name
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = "android.widget.RadioButton"; info.isCheckable = true; info.isChecked = checked
+                    }
+                }
+                foreground = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, rounded(android.graphics.Color.WHITE))
+                setOnClickListener { dialog.dismiss(); onSelected(index) }
+            }
+            panel.addView(option, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+        val scroll = ScrollView(this).apply { addView(panel); isVerticalScrollBarEnabled = false }
+        dialog.setContentView(scroll)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(.25f)
+        }
+        transientDialog = dialog
+        dialog.show()
+        val maxHeight = (resources.displayMetrics.heightPixels * .82f).toInt()
+        val width = minOf(dp(580), resources.displayMetrics.widthPixels - dp(48))
+        panel.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        dialog.window?.setLayout(width, minOf(panel.measuredHeight, maxHeight))
+        if (android.animation.ValueAnimator.areAnimatorsEnabled()) {
+            scroll.alpha = 0f; scroll.translationY = dp(12).toFloat()
+            scroll.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        }
+    }
+
+    private fun settingContent(title: String, description: String) = column().apply {
+        addView(label(title, 26f, true))
+        addView(label(description, 22f).apply { setTextColor(muted) })
+    }
+
+    private fun settingRow(title: String, description: String, value: String, action: () -> Unit) = column().apply {
+        transitionName = "setting-row:$title"
+        setPadding(dp(16), dp(12), dp(16), dp(16))
+        minimumHeight = dp(88)
+        val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        heading.addView(label(title, 26f, true), LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(label(value, 22f).apply { setTextColor(muted); setPadding(dp(12), 0, dp(8), 0) })
+        heading.addView(icon(AppIcon.CHEVRON_RIGHT, muted, 22), LinearLayout.LayoutParams(dp(28), dp(28)))
+        addView(heading)
+        addView(label(description, 22f).apply { setTextColor(muted) })
+        isClickable = true; isFocusable = true
+        contentDescription = "$title, $value. $description"
+        foreground = RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, rounded(android.graphics.Color.WHITE))
+        setOnClickListener { action() }
+    }
+
+    private fun settingSwitch(title: String, description: String, checked: Boolean, enabled: Boolean = true, change: (Boolean) -> Unit) = row().apply {
+        transitionName = "setting-switch:$title"
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(16), dp(12), dp(16), dp(16))
+        addView(settingContent(title, description), LinearLayout.LayoutParams(0, -2, 1f))
+        val control = column().apply { gravity = Gravity.CENTER; alpha = if (enabled) 1f else .45f }
+        val state = label(if (checked) getString(com.binteum.app.R.string.ui_text_115) else getString(com.binteum.app.R.string.ui_text_116), 18f).apply { gravity = Gravity.CENTER; setTextColor(muted) }
+        control.addView(android.widget.Switch(this@MainActivity).apply {
+            isChecked = checked
+            isEnabled = enabled
+            minHeight = dp(48); switchMinWidth = dp(68); showText = false; splitTrack = false
+            contentDescription = "$title. $description"
+            thumbTintList = null; trackTintList = null
+            thumbDrawable = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL; setColor(0xFFF5F7FA.toInt())
+                setSize(dp(28), dp(28)); setStroke(dp(1), 0xFFB6BEC8.toInt())
+            }
+            trackDrawable = android.graphics.drawable.StateListDrawable().apply {
+                fun track(on: Boolean) = GradientDrawable().apply {
+                    cornerRadius = dp(18).toFloat(); setSize(dp(68), dp(34))
+                    setColor(if (on) 0xFF647382.toInt() else 0xFF262B32.toInt())
+                    setStroke(dp(2), if (on) 0xFFBDCAD7.toInt() else 0xFF717C89.toInt())
+                }
+                addState(intArrayOf(android.R.attr.state_checked), track(true))
+                addState(intArrayOf(), track(false))
+            }
+            setOnCheckedChangeListener { _, value ->
+                if (!enabled) return@setOnCheckedChangeListener
+                state.text = if (value) getString(com.binteum.app.R.string.ui_text_115) else getString(com.binteum.app.R.string.ui_text_116)
+                change(value)
+            }
+        }, LinearLayout.LayoutParams(dp(80), dp(48)))
+        control.addView(state)
+        addView(control, LinearLayout.LayoutParams(dp(80), -2).apply { marginStart = dp(20) })
     }
 
     private fun changeTheme(mode: ThemeMode) {
@@ -766,16 +1072,18 @@ class MainActivity : Activity() {
 
     private fun switchSource() {
         if (!BuildConfig.DEBUG) return
-        media.pauseForHost(); interruptActivity("데이터 모드를 바꿨어요.")
+        media.pauseForHost(); interruptActivity(getString(com.binteum.app.R.string.ui_text_117))
         recovery = null; completed = null; source.stop()
         demoMode = !demoMode; prefs.edit().putBoolean("demoMode", demoMode).apply()
         demoScenario = 0; prefs.edit().putInt("demoScenario", 0).apply()
-        session = ChargingSession(target); persistTarget()
+        reminderStart = 0; reminderFinish = 0; windowEndElapsed = 0; windowEndWall = 0
+        session = ChargingSession(target, targetEnabled = false); persistTarget()
         snapshot = null; status = SessionStatus.WAITING_FOR_DATA
         sourceStartedAt = System.currentTimeMillis(); source = makeSource()
         source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
         if (demoMode) emitDemoScenario()
-        saveCheckpoint(); render()
+        saveCheckpoint()
+        if (tab == 2 && connectionCard?.isAttachedToWindow == true) refreshConnectionSettings() else render()
     }
 
     private fun emitDemoScenario() {
@@ -797,7 +1105,7 @@ class MainActivity : Activity() {
             snapshot = null; status = SessionStatus.WAITING_FOR_DATA
             sourceStartedAt = System.currentTimeMillis()
             message = if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
-                "권한을 확인했어요. 새 충전 상태를 확인합니다." else "충전 상태 읽기가 허용되지 않아 활동을 열 수 없어요."
+                getString(com.binteum.app.R.string.ui_text_118) else getString(com.binteum.app.R.string.ui_text_119)
             render()
             if (started) source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
         }
@@ -811,8 +1119,8 @@ class MainActivity : Activity() {
         val run = recovery ?: return
         if (!allowed()) return
         if (!validClock(run) || remainingActivitySeconds(run) <= 0 || remainingWindowSeconds() <= 120) {
-            recovery = null; message = "이전 활동의 시간이 지나 새로 이어갈 수 없어요."
-        } else { active = run; recovery = null; message = "남은 시간으로 이어가요." }
+            recovery = null; message = getString(com.binteum.app.R.string.ui_text_120)
+        } else { active = run; recovery = null; message = getString(com.binteum.app.R.string.ui_text_121) }
         saveCheckpoint(); render()
     }
 
@@ -826,6 +1134,7 @@ class MainActivity : Activity() {
         val run = active ?: recovery
         val data = JSONObject().put("endElapsed", windowEndElapsed).put("endWall", windowEndWall)
             .put("savedElapsed", SystemClock.elapsedRealtime()).put("savedWall", System.currentTimeMillis())
+            .put("reminderStart", reminderStart).put("reminderFinish", reminderFinish)
             .put("quizIndex", quizIndex).put("quizAnswer", quizAnswer ?: -1)
         if (run != null) data.put("run", JSONObject().put("id", run.activityId).put("attempt", run.attemptId)
             .put("elapsed", run.startedElapsed).put("wall", run.startedWall).put("bucket", run.bucket))
@@ -839,8 +1148,11 @@ class MainActivity : Activity() {
             val deltaElapsed = SystemClock.elapsedRealtime() - data.getLong("savedElapsed")
             val deltaWall = System.currentTimeMillis() - data.getLong("savedWall")
             if (deltaElapsed < 0 || deltaWall < 0 || abs(deltaElapsed - deltaWall) > 5_000) {
-                prefs.edit().remove("checkpoint").apply(); message = "시계·기기 상태가 바뀌어 이전 활동을 중단했어요."; return
+                prefs.edit().remove("checkpoint").apply(); message = getString(com.binteum.app.R.string.ui_text_122); return
             }
+            reminderStart = data.optLong("reminderStart")
+            reminderFinish = data.optLong("reminderFinish")
+            if (reminderStart <= 0) return // Older auto-start checkpoints need explicit confirmation.
             windowEndElapsed = data.optLong("endElapsed")
             windowEndWall = data.optLong("endWall")
             quizIndex = data.optInt("quizIndex").coerceAtLeast(0)
@@ -849,7 +1161,7 @@ class MainActivity : Activity() {
                 if (ActivityCatalog.find(item.getString("id")) != null) recovery = Run(item.getString("id"),
                     item.getString("attempt"), item.getLong("elapsed"), item.getLong("wall"), item.getString("bucket"))
             }
-        } catch (_: Exception) { prefs.edit().remove("checkpoint").apply(); message = "이전 활동을 복구할 수 없어 중단했어요." }
+        } catch (_: Exception) { prefs.edit().remove("checkpoint").apply(); message = getString(com.binteum.app.R.string.ui_text_123) }
     }
 
     private fun persistTarget() {
@@ -882,22 +1194,47 @@ class MainActivity : Activity() {
     }
 
     private fun updateLabels() {
-        timeButtons.forEach { it.isEnabled = allowed() && windowEndElapsed == 0L }
-        resetWindowButton?.apply {
-            visibility = if (windowEndElapsed == 0L) View.GONE else View.VISIBLE
-            isEnabled = allowed()
-        }
+        modeToggle?.isEnabled = safeToConfigure() && reminderStart == 0L
+        modeToggle?.alpha = if (safeToConfigure()) 1f else .45f
+        val localTime = java.time.LocalTime.now()
+        val sky = AmbientSky.colors(backgroundMode, localTime.hour * 60 + localTime.minute)
+        reminderDial?.updateTint(if (backgroundMode.isFlat) palette.text else AmbientSky.blend(sky.middle, 0xFFE2E5E9.toInt(), .55f))
         val usable = snapshot?.takeIf { System.currentTimeMillis() - it.observedAtMillis in 0..30_000 && it.observedAtMillis >= sourceStartedAt }
         val percent = usable?.stateOfCharge?.takeIf { it in 0..100 }
-        socLabel?.text = percent?.let { "$it%" } ?: "—"
-        chargeGauge?.update(percent, palette)
-        statusLabel?.text = statusText()
+        socLabel?.text = if (percent != null) {
+            val text = getString(R.string.battery_percent, percent)
+            android.text.SpannableString(text).apply {
+                val number = "$percent%"
+                val start = text.indexOf(number)
+                if (start >= 0) setSpan(android.text.style.RelativeSizeSpan(48f / 26f), start, start + number.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        } else getString(R.string.battery_unknown)
         diagnosticsLabel?.text = (source as? PleosVehicleDataSource)?.diagnostics.orEmpty()
-        windowLabel?.text = if (windowEndElapsed == 0L) "${windowMinutes}분" else clock(remainingWindowSeconds())
+        val running = reminderStart > 0
+        if (running) {
+            val elapsed = (((if (reminderFinish > 0) reminderFinish else SystemClock.elapsedRealtime()) - reminderStart).coerceAtLeast(0) / 1000).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            reminderDial?.progress(if (targetMode) "${target}%" else clock(remainingWindowSeconds()),
+                if (reminderFinish > 0) getString(com.binteum.app.R.string.ui_text_124) else if (targetMode) getString(com.binteum.app.R.string.ui_text_125) else getString(com.binteum.app.R.string.ui_text_127),
+                if (targetMode) (percent ?: 0).toFloat() / target else 1f - remainingWindowSeconds().toFloat() / (windowMinutes * 60))
+            reminderSubtitle?.text = if (targetMode) clock(elapsed) else getString(R.string.minute_reminder, windowMinutes)
+        } else {
+            reminderDial?.isEnabled = safeToConfigure()
+            reminderSubtitle?.text = ""
+        }
+        reminderSubtitle?.visibility = if (reminderSubtitle?.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        confirmReminder?.isEnabled = safeToConfigure() && (running || snapshot?.charging == true)
+        statusLabel?.text = when {
+            reminderFinish > 0 -> ""
+            !safeToConfigure() -> getString(com.binteum.app.R.string.ui_text_000)
+            snapshot?.charging != true -> getString(com.binteum.app.R.string.ui_text_007)
+            else -> ""
+        }
+        statusLabel?.visibility = if (statusLabel?.text.isNullOrBlank()) View.GONE else View.VISIBLE
         active?.let { run ->
             val left = remainingActivitySeconds(run)
             timerLabel?.textSize = if (left == 0) 28f else 64f
-            timerLabel?.text = if (left == 0) "시간이 되었어요. 완료를 확인해 주세요." else clock(left)
+            timerLabel?.text = if (left == 0) getString(com.binteum.app.R.string.ui_text_128) else clock(left)
         }
     }
 
