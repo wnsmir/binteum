@@ -1,6 +1,17 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+val nearbyApiOverride = providers.gradleProperty("binteumNearbyApiBaseUrl").orNull?.trim().orEmpty()
+fun quotedBuildValue(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+if (nearbyApiOverride.isNotEmpty()) {
+    val parsed = URI(nearbyApiOverride)
+    require(parsed.scheme == "https" && parsed.host != null && parsed.rawUserInfo == null &&
+        parsed.rawQuery == null && parsed.rawFragment == null) {
+        "binteumNearbyApiBaseUrl must be an HTTPS server origin or base path without credentials/query/fragment"
+    }
 }
 android {
     namespace = "com.binteum.app"
@@ -18,6 +29,15 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = providers.gradleProperty("binteumTestRunner")
             .getOrElse("com.binteum.app.ChargeExperienceProbe")
+    }
+    buildTypes {
+        getByName("debug") {
+            buildConfigField("String", "NEARBY_API_BASE_URL", quotedBuildValue(nearbyApiOverride.ifEmpty { "http://127.0.0.1:3210" }))
+        }
+        getByName("release") {
+            // A production backend is configured explicitly; localhost is never shipped in release.
+            buildConfigField("String", "NEARBY_API_BASE_URL", quotedBuildValue(nearbyApiOverride))
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21

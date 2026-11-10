@@ -107,17 +107,17 @@ class MainActivity : Activity() {
     private var estimateSourceLabel: TextView? = null
     private var goalLabel: TextView? = null
     private var pendingVideoEntry = UsageEntryPoint.MANUAL
-    private var nearbyArea = ""
-    private var nearbyProvider = MapProvider.KAKAO
     private var nearbyFix: VehicleLocationFix? = null
     private var nearbyNote = ""
     private lateinit var locationReader: VehicleLocationReader
     private lateinit var comfort: ComfortController
-    private var outboundMinutes = 5
-    private var returnMinutes = 5
-    private var stayMinutes = 10
-    private var routeConfirmed = false
-    private var nearbyBudgetLabel: TextView? = null
+    private lateinit var nearbyClient: NearbySuggestionsClient
+    private var nearbyKind: NearbyKind? = null
+    private var nearbyResult: NearbyLookupResult? = null
+    private var nearbyLoading = false
+    private var nearbyGeneration = 0L
+    private var nearbyResumeKind: NearbyKind? = null
+    private val nearbyPlanLabels = mutableMapOf<NearbyPlace, TextView>()
     private var napDurationMinutes = 15
     private var nap: NapSession? = null
     private var napChoiceId: String? = null
@@ -202,7 +202,7 @@ class MainActivity : Activity() {
             updateLabels()
             refreshMediaGate()
             tickNap()
-            updateNearbyBudget()
+            updateNearbyPlans()
             if (tab == 0 && allowed() && active == null && recovery == null && completed == null &&
                 windowContentKey() != lastWindowContentKey) render(preserveScroll = true)
             handler.postDelayed(this, 1_000)
@@ -248,6 +248,7 @@ class MainActivity : Activity() {
         }
         source = makeSource()
         locationReader = VehicleLocationReader(this)
+        nearbyClient = NearbySuggestionsClient()
         comfort = ComfortController(this) { !demoMode && safeToConfigure() && tab == 5 && nap == null }
         restoreCheckpoint()
         session = ChargingSession(target, targetEnabled = false)
@@ -257,7 +258,6 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         started = true
-        routeConfirmed = false
         snapshot = null
         chargePlanner.reset()
         status = SessionStatus.WAITING_FOR_DATA
@@ -273,6 +273,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         if (nap != null) endNap(false, tx("화면을 벗어나 휴식을 종료했어요. 기상 알림도 중지됐어요.", "Rest ended when this screen was left. The wake cue was stopped."))
         napChime.stop()
+        cancelNearbyWork()
         resumed = false
         completionVoice.stop()
         ambientBackground.setActive(false)
@@ -289,6 +290,7 @@ class MainActivity : Activity() {
         snapshot?.let(::acceptSnapshot)
         render()
         if (tab == 5 && !demoMode && nap == null) comfort.refresh()
+        resumeNearbyPermission()
     }
 
     override fun onStop() {
@@ -299,7 +301,7 @@ class MainActivity : Activity() {
         saveCheckpoint()
         source.stop()
         comfort.stop()
-        locationReader.cancel()
+        cancelNearbyWork()
         super.onStop()
     }
 
@@ -308,7 +310,7 @@ class MainActivity : Activity() {
         if (!goBack()) super.onBackPressed()
     }
 
-    override fun onDestroy() { completionVoice.stop(); ambientBackground.release(); media.release(); usageStore.close(); super.onDestroy() }
+    override fun onDestroy() { nearbyClient.close(); completionVoice.stop(); ambientBackground.release(); media.release(); usageStore.close(); super.onDestroy() }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -319,7 +321,6 @@ class MainActivity : Activity() {
     private fun makeSource(): VehicleDataSource = if (demoMode) DemoVehicleDataSource() else PleosVehicleDataSource(this)
 
     private fun acceptSnapshot(value: VehicleSnapshot) {
-        if (snapshot?.charging != true && value.charging == true) routeConfirmed = false
         if (snapshot?.charging == false && value.charging == true && departureAtMillis?.let { it <= System.currentTimeMillis() } == true) {
             departureAtMillis = null; prefs.edit().remove("departureAtMillis").apply()
         }
@@ -330,6 +331,10 @@ class MainActivity : Activity() {
         val result = if (value.observedAtMillis < sourceStartedAt) SessionResult(SessionStatus.WAITING_FOR_DATA)
             else session.update(value, System.currentTimeMillis())
         status = result.status
+        if (!allowed() && (nearbyLoading || nearbyResult != null)) {
+            cancelNearbyWork()
+            nearbyNote = tx("차량 상태가 바뀌어 검색을 멈췄어요. 다시 검색해 주세요.", "Vehicle status changed. Search again to refresh nearby places.")
+        }
         if (status == SessionStatus.CHARGING && previous != status && active == null && recovery == null) {
             message = ""
         }
@@ -360,6 +365,7 @@ class MainActivity : Activity() {
         } else updateLabels()
         if (!safeToConfigure()) transientDialog?.dismiss()
         maybeShowEnergyIntroduction()
+        resumeNearbyPermission()
     }
 
     private fun statusText() = when (status) {
@@ -422,7 +428,7 @@ class MainActivity : Activity() {
         try {
             (media.parent as? ViewGroup)?.removeView(media)
             media.applyPalette(palette)
-            timerLabel = null; diagnosticsLabel = null; napLabel = null; nearbyBudgetLabel = null
+            timerLabel = null; diagnosticsLabel = null; napLabel = null; nearbyPlanLabels.clear()
             napPlanLabel = null; napStartButton = null
             window.statusBarColor = paper
             window.navigationBarColor = palette.surface
@@ -526,7 +532,7 @@ class MainActivity : Activity() {
         tab == 1 -> tx("영상", "Videos")
         tab == 2 -> tx("설정", "Settings")
         tab == 3 -> tx("활동", "Activities")
-        tab == 4 -> tx("주변", "Nearby")
+        tab == 4 -> nearbyKind?.let(::nearbyTitle) ?: tx("주변", "Nearby")
         tab == 5 -> tx("낮잠", "Nap")
         else -> tx("대시보드", "Dashboard")
     }
@@ -765,6 +771,9 @@ class MainActivity : Activity() {
             render()
             return true
         }
+        if (tab == 4 && nearbyKind != null) {
+            cancelNearbyWork(); nearbyKind = null; nearbyResumeKind = null; nearbyNote = ""; render(); return true
+        }
         if (tab == 1 && media.closeOpenContent()) return true
         val destination = if (screenHistory.isNotEmpty()) screenHistory.removeLast() else if (tab != 0) 0 else return false
         navigateTo(destination, remember = false)
@@ -773,6 +782,7 @@ class MainActivity : Activity() {
 
     private fun navigateTo(destination: Int, remember: Boolean = true) {
         if (tab == destination) return
+        if (tab == 4) { cancelNearbyWork(); nearbyResumeKind = null }
         if (nap != null) endNap(false, tx("다른 화면으로 이동해 휴식을 마쳤어요", "Rest ended when you changed screens"))
         napChime.stop()
         screenScrolls[tab] = (leftScroll?.scrollY ?: 0) to (contentScroll?.scrollY ?: 0)
@@ -925,85 +935,198 @@ class MainActivity : Activity() {
             "Opens an external app or browser. Login, membership and device support are required; playback is outside this app's control."), AppIcon.PLAY) { openNetflix() })
     }
 
+    private fun nearbyTitle(kind: NearbyKind) = when (kind) {
+        NearbyKind.CAFE -> tx("근처 카페", "Nearby cafes")
+        NearbyKind.FOOD -> tx("근처 식사", "Nearby meals")
+        NearbyKind.CONVENIENCE -> tx("근처 간식", "Nearby snacks")
+        NearbyKind.PARK -> tx("근처 산책", "Nearby walks")
+    }
+
     private fun buildNearby(parent: LinearLayout) {
-        parent.addView(label(tx("차 밖의 작은 여유", "A little time outside"), 32f, true))
-        parent.addView(label(tx("지도에서 장소와 도보 경로를 확인하고, 돌아올 시간을 남겨두세요.", "Check places and walking routes on a map, with time left to return."), 21f))
-        val setup = addCardGrid(parent, 300, 450, 2)
-        val search = surfaceCard()
-        search.addView(sectionTitle(tx("어디에서 찾을까요?", "Where to explore?"), AppIcon.MAP))
-        search.addView(button(if (nearbyArea.isBlank()) tx("지역·충전소 이름 입력", "Enter an area or charging station") else nearbyArea) { editNearbyArea() })
-        search.addView(button(tx("차량 위치 한 번 가져오기", "Get vehicle location once"), enabled = !demoMode) { requestVehicleLocation() })
-        search.addView(label(if (demoMode) tx("시연 모드에서는 지역명을 입력하세요.", "Enter an area name in demo mode.") else nearbyNote.ifBlank {
-            tx("위치는 검색·QR을 선택할 때만 지도에 전달해요.", "Location is shared with the map only when you choose a search or QR.") }, 18f).apply { setTextColor(muted) })
-        search.addView(button(if (nearbyProvider == MapProvider.KAKAO) "Kakao Map ▾" else "NAVER Map ▾") {
-            chooseSetting(tx("지도 선택", "Map provider"), listOf("Kakao Map", "NAVER Map"), nearbyProvider.ordinal) {
-                nearbyProvider = MapProvider.entries[it]; routeConfirmed = false; render(preserveScroll = true)
+        parent.addView(label(tx("지금 있는 곳에서, 잠깐", "A short break, right nearby"), 32f, true))
+        val kind = nearbyKind
+        if (kind == null) {
+            parent.addView(label(tx("누르면 차량의 현재 위치로 가까운 장소와 도보 왕복시간을 찾아요.", "Choose a category to find places and round-trip walking times from your vehicle."), 22f))
+            val cards = addCardGrid(parent)
+            NearbyKind.entries.forEach { category ->
+                cards.addView(choiceCard(nearbyTitle(category), tx("현재 위치로 자동 추천", "Automatic suggestions from your location"),
+                    if (category == NearbyKind.PARK) AppIcon.LEAF else AppIcon.COFFEE) { requestNearby(category) })
             }
-        })
-        search.addView(button(tx("차량 위치를 휴대폰으로", "Vehicle pin for your phone"), enabled = nearbyFix?.isFresh() == true) {
-            if (allowed()) {
-                val link = nearbyFix?.let(NearbyMapLinks::vehicleLink)
-                if (link != null) showMapHandoff(link, tx("충전 차량 위치", "Charging vehicle"))
-                else toast(tx("차량 위치를 다시 가져와 주세요", "Refresh the vehicle location first"))
-            }
-        })
-        setup.addView(search)
-        val plan = surfaceCard()
-        plan.addView(sectionTitle(tx("돌아올 시간까지 계산", "Plan your return"), AppIcon.CLOCK))
-        plan.addView(button(tx("가는 길 $outboundMinutes · 오는 길 $returnMinutes · 체류 ${stayMinutes}분", "Out $outboundMinutes · Back $returnMinutes · Stay $stayMinutes min")) { editWalkingPlan() })
-        plan.addView(button(if (routeConfirmed) tx("도보 경로 시간 확인됨 ✓", "Walking times checked ✓") else tx("지도에서 왕복시간 확인했어요", "I checked both walking times"), routeConfirmed) {
-            if (allowed()) { routeConfirmed = !routeConfirmed; updateNearbyBudget(); render(preserveScroll = true) }
-        })
-        nearbyBudgetLabel = label("", 22f, true).also { plan.addView(it) }
-        plan.addView(label(tx("복귀 여유 5분 포함 · 예상시간은 달라질 수 있어요. 휴대폰 알람은 직접 설정해 주세요.",
-            "Includes a 5-minute return buffer. Estimates can change. Set a return alarm on your phone."), 18f).apply { setTextColor(muted) })
-        setup.addView(plan)
-        val cards = addCardGrid(parent)
-        listOf(Triple(NearbyKind.CAFE, tx("커피 한 잔", "Coffee"), AppIcon.COFFEE),
-            Triple(NearbyKind.FOOD, tx("가까운 식사", "A nearby meal"), AppIcon.COFFEE),
-            Triple(NearbyKind.CONVENIENCE, tx("가벼운 간식", "A quick snack"), AppIcon.COFFEE),
-            Triple(NearbyKind.PARK, tx("공원 산책", "A park walk"), AppIcon.LEAF)).forEach { (kind, title, glyph) ->
-            cards.addView(choiceCard(title, tx("지도에서 영업시간·보행 경로 확인", "Check opening hours and walking routes on the map"), glyph) { openNearby(kind, title) })
+            parent.addView(label(tx("선택하면 현재 좌표를 지도 서비스에 보내요. 위치와 검색 결과는 이력에 저장하지 않아요.",
+                "Choosing a category sends your current coordinates to the map service. Locations and search results are not saved in your history."), 18f).apply { setTextColor(muted) })
+            return
         }
-        updateNearbyBudget()
+        parent.addView(sectionTitle(nearbyTitle(kind), if (kind == NearbyKind.PARK) AppIcon.LEAF else AppIcon.COFFEE))
+        if (nearbyLoading) {
+            val loading = surfaceCard()
+            loading.addView(android.widget.ProgressBar(this), LinearLayout.LayoutParams(dp(44), dp(44)))
+            loading.addView(label(nearbyNote, 24f, true))
+            addCardGrid(parent, 280, 600, 1).addView(loading)
+            return
+        }
+        if (nearbyNote.isNotBlank()) parent.addView(label(nearbyNote, 21f).apply { setTextColor(muted) })
+        val result = nearbyResult
+        if (result != null && result.failure == null) {
+            if (result.places.isEmpty()) {
+                parent.addView(label(if (result.coverage == NearbyCoverage.OUTSIDE_COVERAGE)
+                    tx("현재 위치는 지원 지역 밖이에요. 지금은 대한민국의 주변 장소를 제공해요.", "This location is outside the supported area. Nearby places are currently available in South Korea.")
+                    else tx("이 주변에서 확인된 장소가 없어요. 다른 종류를 골라보세요.", "No matching places were found here. Try another category."), 25f, true))
+                if (result.coverage == NearbyCoverage.OUTSIDE_COVERAGE &&
+                    (Build.HARDWARE in listOf("ranchu", "goldfish") || Build.MODEL.contains("emulator", true))) {
+                    parent.addView(label(tx("에뮬레이터에 설정된 차량 위치를 확인해 주세요.", "Check the vehicle location configured in the emulator."), 20f))
+                }
+            } else {
+                parent.addView(label(tx("왕복 도보 + 머무는 시간 + 복귀 여유 5분으로 비교했어요.", "Compared using both walking legs, time at the place, and a 5-minute return buffer."), 20f))
+                val cards = addCardGrid(parent)
+                result.places.sortedBy { when (it.fitFor(recommendationSeconds())) {
+                    NearbyFit.FITS -> 0; NearbyFit.UNKNOWN -> 1; NearbyFit.ROUTE_UNAVAILABLE -> 2; NearbyFit.TOO_LONG -> 3
+                } }.forEach { place ->
+                    val card = surfaceCard()
+                    card.addView(icon(if (kind == NearbyKind.PARK) AppIcon.LEAF else AppIcon.COFFEE, size = 32), LinearLayout.LayoutParams(dp(48), dp(48)))
+                    card.addView(label(place.name, 25f, true))
+                    if (place.address.isNotBlank()) card.addView(label(place.address, 18f).apply { setTextColor(muted) })
+                    val out = place.outboundSeconds; val back = place.returnSeconds
+                    card.addView(label(if (out != null && back != null)
+                        tx("가는 길 ${(out + 59) / 60}분 · 오는 길 ${(back + 59) / 60}분", "Walk out ${(out + 59) / 60} min · return ${(back + 59) / 60} min")
+                        else tx("보행 경로 시간을 확인하지 못했어요", "Walking times are unavailable"), 20f))
+                    card.addView(label(tx("${place.staySeconds / 60}분 ${if (kind == NearbyKind.PARK) "산책" else "머무르기"}", "${place.staySeconds / 60} minutes ${if (kind == NearbyKind.PARK) "walking in the park" else "at the place"}"), 20f))
+                    nearbyPlanLabels[place] = label(nearbyPlanText(place), 21f, true).also { card.addView(it) }
+                    card.addView(button(tx("지도·가는 길", "Map and outward route")) { openNearbyPlace(place, false) })
+                    if (place.returnUrl != null) card.addView(button(tx("차량으로 돌아오는 길", "Route back to the vehicle")) { openNearbyPlace(place, true) })
+                    cards.addView(card)
+                }
+                if (Build.HARDWARE in listOf("ranchu", "goldfish") || Build.MODEL.contains("emulator", true)) {
+                    parent.addView(label(tx("에뮬레이터에 설정된 차량 위치 기준이에요.", "Based on the vehicle location configured in the emulator."), 18f).apply { setTextColor(muted) })
+                }
+                parent.addView(label(tx("영업 여부와 현장 보행 여건은 달라질 수 있어요. 휴대폰에 복귀 알람을 설정해 주세요.",
+                    "Opening hours and walking conditions can change. Set a return alarm on your phone."), 18f).apply { setTextColor(muted) })
+            }
+            if (result.attribution.isNotBlank()) parent.addView(label(result.attribution, 16f).apply {
+                setTextColor(muted)
+                if (result.provider == NearbyProvider.OPENSTREETMAP) {
+                    paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+                    isFocusable = true; isClickable = true
+                    setOnClickListener { showMapHandoff(Uri.parse("https://www.openstreetmap.org/copyright"), "OpenStreetMap contributors") }
+                }
+            })
+        }
+        val actions = row()
+        actions.addView(button(tx("다시 검색", "Search again")) { requestNearby(kind, record = false) }, LinearLayout.LayoutParams(-2, -2))
+        actions.addView(button(tx("다른 종류", "Other categories")) { cancelNearbyWork(); nearbyKind = null; nearbyResumeKind = null; nearbyNote = ""; render() },
+            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
+        parent.addView(actions)
     }
 
-    private fun editNearbyArea() {
-        if (!allowed()) return
-        val field = android.widget.EditText(this).apply {
-            setText(nearbyArea); hint = tx("예: 판교역 또는 충전소 이름", "Area or charging station name")
-            setSingleLine(); filters = arrayOf(android.text.InputFilter.LengthFilter(80))
+    private fun requestNearby(kind: NearbyKind, record: Boolean = true) {
+        if (!allowed() || tab != 4) return
+        cancelNearbyWork()
+        nearbyKind = kind
+        if (record) {
+            recordChoice(if (kind == NearbyKind.PARK) UsageCategory.WALK else UsageCategory.FOOD, nearbyEntry)
+            nearbyEntry = UsageEntryPoint.MANUAL
         }
-        transientDialog = AlertDialog.Builder(this, dialogTheme()).setTitle(tx("검색할 지역", "Search area")).setView(field)
-            .setPositiveButton(tx("적용", "Apply")) { _, _ -> if (allowed()) { nearbyArea = field.text.toString().trim(); routeConfirmed = false; render(preserveScroll = true) } }
-            .setNegativeButton(tx("취소", "Cancel"), null).show()
-    }
-
-    private fun requestVehicleLocation() {
-        if (!allowed() || demoMode) return
-        if (!locationReader.hasPermission()) { requestPermissions(arrayOf(VehicleLocationReader.PERMISSION), 701); return }
-        nearbyNote = tx("차량 위치를 확인하고 있어요…", "Checking vehicle location…"); render(preserveScroll = true)
-        locationReader.requestOnce { result ->
-            if (!started || !resumed || !allowed() || demoMode) return@requestOnce
-            nearbyFix = result.fix; routeConfirmed = false
-            nearbyNote = if (result.fix != null) tx("차량 위치 확인 · 지역명을 비우면 카카오 검색에 사용해요.", "Vehicle location available. Clear the area name to use it with Kakao.")
-                else tx("차량 위치를 가져오지 못했어요. 지역명으로 검색할 수 있어요.", "Vehicle location unavailable. Search using an area name.")
+        if (!locationReader.hasPermission()) {
+            nearbyResumeKind = kind
+            nearbyNote = tx("주변 장소를 찾으려면 차량 위치 권한을 허용해 주세요.", "Allow vehicle location to find nearby places.")
             render(preserveScroll = true)
+            val asked = prefs.getBoolean("askedNearbyLocation", false)
+            prefs.edit().putBoolean("askedNearbyLocation", true).apply()
+            if (asked && !shouldShowRequestPermissionRationale(VehicleLocationReader.PERMISSION)) {
+                runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+                    .onFailure { nearbyResumeKind = null; toast(tx("앱 설정에서 위치 권한을 허용해 주세요.", "Allow location in the app settings.")) }
+            } else requestPermissions(arrayOf(VehicleLocationReader.PERMISSION), 701)
+            return
+        }
+        nearbyResumeKind = null
+        val requestId = nearbyGeneration
+        nearbyLoading = true
+        nearbyNote = tx("차량의 현재 위치를 확인하고 있어요…", "Getting your vehicle's current location…")
+        render(preserveScroll = true)
+        locationReader.requestOnce { location ->
+            if (!nearbyRequestCurrent(requestId)) return@requestOnce
+            val fix = location.fix
+            if (fix == null) {
+                nearbyLoading = false
+                nearbyNote = when (location.failure) {
+                    LocationFailure.PERMISSION_REQUIRED -> tx("위치 권한이 필요해요. 다시 검색을 눌러 허용해 주세요.", "Location permission is needed. Search again to allow it.")
+                    LocationFailure.UNSUPPORTED -> tx("이 차량에서 위치 서비스를 사용할 수 없어요.", "Vehicle location is unavailable on this device.")
+                    else -> tx("현재 차량 위치를 받지 못했어요. 차량 위치 서비스가 켜져 있는지 확인하고 다시 검색해 주세요.", "No current vehicle location. Check that vehicle location is on, then search again.")
+                }
+                render(preserveScroll = true)
+                return@requestOnce
+            }
+            nearbyFix = fix
+            nearbyNote = tx("가까운 장소와 도보 왕복시간을 찾고 있어요…", "Finding nearby places and walking times…")
+            render(preserveScroll = true)
+            nearbyClient.lookup(fix, kind, recommendationSeconds()) { result ->
+                if (!nearbyRequestCurrent(requestId)) return@lookup
+                nearbyLoading = false; nearbyResult = result
+                nearbyNote = result.failure?.let(::nearbyFailureText) ?: tx("현재 차량 위치에서 가까운 순서로 살펴봤어요.", "Places near your current vehicle location.")
+                render(preserveScroll = true)
+            }
         }
     }
 
-    private fun openNearby(kind: NearbyKind, title: String) {
-        if (!allowed()) return
-        val uri = NearbyMapLinks.searchLink(nearbyProvider, nearbyArea, kind, if (demoMode) null else nearbyFix)
-        if (uri == null) {
-            nearbyNote = tx("검색할 지역명을 입력하세요. 네이버 검색에는 지역명이 필요해요.", "Enter an area name. Naver search requires an area.")
-            render(preserveScroll = true); editNearbyArea(); return
+    private fun nearbyRequestCurrent(requestId: Long) = started && resumed && tab == 4 && allowed() &&
+        locationReader.hasPermission() && requestId == nearbyGeneration
+
+    private fun resumeNearbyPermission() {
+        val kind = nearbyResumeKind ?: return
+        if (!resumed || tab != 4 || !allowed() || !locationReader.hasPermission()) return
+        nearbyResumeKind = null
+        requestNearby(kind, record = false)
+    }
+
+    private fun cancelNearbyWork() {
+        if (nearbyLoading || nearbyResult != null) nearbyNote = tx("다시 검색하면 현재 위치부터 확인해요.", "Search again to refresh your current location.")
+        nearbyGeneration++
+        if (::locationReader.isInitialized) locationReader.cancel()
+        if (::nearbyClient.isInitialized) nearbyClient.cancel()
+        nearbyLoading = false; nearbyResult = null; nearbyFix = null
+        nearbyPlanLabels.clear()
+    }
+
+    private fun nearbyFailureText(failure: NearbyFailure): String = when (failure) {
+        NearbyFailure.NOT_CONFIGURED -> tx("주변 검색 서비스 연결이 아직 준비되지 않았어요.", "The nearby service is not configured yet.")
+        NearbyFailure.LOCATION_STALE -> tx("차량 위치가 오래됐어요. 다시 검색하면 현재 위치부터 확인해요.", "The vehicle location is old. Search again to refresh it.")
+        NearbyFailure.RATE_LIMITED -> tx("검색이 몰리고 있어요. 잠시 뒤 다시 검색해 주세요.", "The map service is busy. Try again shortly.")
+        NearbyFailure.PROVIDER_AUTH -> tx("지도 서비스 인증을 확인해야 해요.", "Map service authorization needs attention.")
+        NearbyFailure.PROVIDER_TIMEOUT -> tx("지도 응답이 늦어지고 있어요. 잠시 뒤 다시 검색해 주세요.", "The map service took too long. Try again shortly.")
+        NearbyFailure.NETWORK_ERROR -> tx("주변 검색 서비스에 연결하지 못했어요. 연결을 확인하고 다시 검색해 주세요.", "Could not connect to the nearby service. Check the connection and try again.")
+        else -> tx("장소 정보를 확인하지 못했어요. 잠시 뒤 다시 검색해 주세요.", "Could not verify nearby places. Try again shortly.")
+    }
+
+    private fun nearbyResultFresh(): Boolean = nearbyFix?.isFresh() == true && nearbyResult?.generatedAtMillis?.let {
+        System.currentTimeMillis() - it in -10_000..120_000
+    } == true
+
+    private fun nearbyPlanText(place: NearbyPlace): String {
+        if (!nearbyResultFresh()) return tx("현재 위치와 시간을 다시 확인해 주세요", "Refresh the location and time estimate")
+        return when (place.fitFor(recommendationSeconds())) {
+            NearbyFit.FITS -> tx("총 ${(place.totalSeconds!! + 59) / 60}분 · 지금 다녀올 여유가 있어요", "Total ${(place.totalSeconds!! + 59) / 60} min · fits the current time window")
+            NearbyFit.TOO_LONG -> tx("총 ${(place.totalSeconds!! + 59) / 60}분 · 남은 시간보다 길어요", "Total ${(place.totalSeconds!! + 59) / 60} min · exceeds your time window")
+            NearbyFit.UNKNOWN -> tx("남은 충전시간 미확인 · 복귀 가능 여부 미확정", "Charge time unknown · return fit unconfirmed")
+            NearbyFit.ROUTE_UNAVAILABLE -> tx("왕복시간 미확인 · 시간에 맞는 추천에서 제외", "Walking time unknown · not a time-matched recommendation")
         }
-        routeConfirmed = false
-        recordChoice(if (kind == NearbyKind.PARK) UsageCategory.WALK else UsageCategory.FOOD, nearbyEntry)
-        nearbyEntry = UsageEntryPoint.MANUAL
-        updateNearbyBudget()
-        showMapHandoff(uri, title)
+    }
+
+    private fun updateNearbyPlans() {
+        if ((nearbyLoading || nearbyResult != null) && !locationReader.hasPermission()) {
+            cancelNearbyWork()
+            nearbyNote = tx("위치 권한을 다시 허용해야 주변 장소를 찾을 수 있어요.", "Allow location again to find nearby places.")
+            if (tab == 4) render(preserveScroll = true)
+            return
+        }
+        nearbyPlanLabels.forEach { (place, text) -> text.text = nearbyPlanText(place) }
+    }
+
+    private fun openNearbyPlace(place: NearbyPlace, returning: Boolean) {
+        if (!allowed() || !nearbyResultFresh()) {
+            if (allowed()) toast(tx("다시 검색을 눌러 현재 위치와 시간을 갱신해 주세요.", "Search again to update location and time."))
+            return
+        }
+        showMapHandoff((if (returning) place.returnUrl else place.outboundUrl) ?: place.url,
+            if (returning) tx("차량으로 복귀", "Return to vehicle") else place.name)
     }
 
     private fun showMapHandoff(uri: Uri, title: String) {
@@ -1028,43 +1151,6 @@ class MainActivity : Activity() {
             if (!allowed()) { dialog.dismiss(); return@setOnClickListener }
             if (NearbyMapLauncher(this) { allowed() }.open(uri)) dialog.dismiss()
             else toast(tx("연결할 지도 앱이 없어요. 휴대폰 QR을 사용해 주세요.", "No compatible map app. Use the phone QR."))
-        }
-    }
-
-    private fun editWalkingPlan() {
-        if (!allowed()) return
-        val content = column().apply { setPadding(dp(24), dp(8), dp(24), 0) }
-        fun field(title: String, initial: Int): android.widget.EditText {
-            content.addView(label(title, 20f))
-            return android.widget.EditText(this).apply { setText(initial.toString()); inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                filters = arrayOf(android.text.InputFilter.LengthFilter(3)); content.addView(this) }
-        }
-        val out = field(tx("가는 도보시간 (분)", "Outbound walk (min)"), outboundMinutes)
-        val back = field(tx("오는 도보시간 (분)", "Return walk (min)"), returnMinutes)
-        val stay = field(tx("머무는 시간 (분)", "Time at the place (min)"), stayMinutes)
-        val dialog = AlertDialog.Builder(this, dialogTheme()).setTitle(tx("지도에서 확인한 시간", "Times checked on the map")).setView(content)
-            .setPositiveButton(tx("적용", "Apply"), null).setNegativeButton(tx("취소", "Cancel"), null).create()
-        transientDialog = dialog; dialog.show()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            if (!allowed()) { dialog.dismiss(); return@setOnClickListener }
-            val a = out.text.toString().toIntOrNull(); val b = back.text.toString().toIntOrNull(); val c = stay.text.toString().toIntOrNull()
-            if (a == null || b == null || c == null || a !in 1..180 || b !in 1..180 || c !in 0..180) {
-                toast(tx("이동은 1~180분, 체류는 0~180분으로 입력하세요.", "Walking: 1–180 min. Stay: 0–180 min.")); return@setOnClickListener
-            }
-            outboundMinutes = a; returnMinutes = b; stayMinutes = c; routeConfirmed = false
-            dialog.dismiss(); render(preserveScroll = true)
-        }
-    }
-
-    private fun updateNearbyBudget() {
-        val result = NearbyTimeBudget.assess(recommendationSeconds(), outboundMinutes * 60, returnMinutes * 60, stayMinutes * 60, routeConfirmed)
-        val total = (result.requiredSeconds ?: 0) / 60
-        nearbyBudgetLabel?.text = when (result.status) {
-            NearbyBudgetStatus.FITS -> tx("총 ${total}분 · 현재 예상 범위에 들어와요", "Total $total min · fits the current estimate")
-            NearbyBudgetStatus.NOT_ENOUGH_TIME -> tx("총 ${total}분 · 지금은 시간이 부족해요", "Total $total min · not enough time now")
-            NearbyBudgetStatus.UNKNOWN_WINDOW -> tx("남은 충전시간을 확인해야 계산할 수 있어요", "A remaining-time estimate is needed")
-            NearbyBudgetStatus.UNCONFIRMED_ROUTE -> tx("총 ${total}분 입력됨 · 지도에서 왕복시간을 확인하세요", "Entered $total min · verify both walking times on the map")
-            NearbyBudgetStatus.INVALID_PLAN -> tx("이동·체류 시간을 다시 입력하세요", "Check the walking and stay times")
         }
     }
 
@@ -1580,7 +1666,7 @@ class MainActivity : Activity() {
     private fun switchSource() {
         if (!BuildConfig.DEBUG) return
         if (nap != null) endNap(false, tx("데이터 모드가 바뀌어 휴식을 마쳤어요", "Rest ended after changing the data mode"))
-        nearbyFix = null; routeConfirmed = false; locationReader.cancel()
+        cancelNearbyWork(); nearbyResumeKind = null
         media.pauseForHost(); interruptActivity(getString(com.binteum.app.R.string.ui_text_117))
         recovery = null; completed = null; source.stop()
         demoMode = !demoMode; prefs.edit().putBoolean("demoMode", demoMode).apply()
@@ -1610,8 +1696,12 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 701) {
-            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && allowed()) requestVehicleLocation()
-            else { nearbyNote = tx("위치 권한이 없어 지역명 검색을 사용해요", "Use an area name without location permission"); render(preserveScroll = true) }
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) resumeNearbyPermission()
+            else {
+                nearbyResumeKind = null; nearbyLoading = false
+                nearbyNote = tx("현재 위치를 사용하려면 위치 권한이 필요해요. 다시 검색을 눌러 허용해 주세요.", "Location permission is needed for nearby places. Use Search again to allow it.")
+                render(preserveScroll = true)
+            }
         }
         if (requestCode == 702 && !demoMode) comfort.refresh()
         if (requestCode == 700 && !demoMode) {

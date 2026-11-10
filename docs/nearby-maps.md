@@ -1,35 +1,62 @@
-# 주변 지도 연결 — 2026-11-10
+# 현재 위치 기반 주변 추천 — 2026-11-10
 
-현재 앱은 외부 지도의 검색 결과와 차량 위치 핀을 여는 링크를 만든다. 자체 장소 DB, 영업 여부 판정, 도보 경로 계산 API를 호출하지 않는다. 실제 보행 시간은 외부 지도에서 확인하고 사용자가 입력한다. 카페·음식점·편의점·공원은 검색 종류이며, 검증된 특정 가게 추천 목록이 아니다.
+주변 탭에서 카페·식사·간식·산책을 누르면 **차량 현재 위치 → 주변 장소 → 실제 도보 왕복 경로 → 남은 충전시간 비교** 순서로 자동 조회한다. 충전소 이름이나 지역명, 이동시간을 입력하지 않는다. 위치를 받지 못하면 다른 지역이나 임의 좌표를 사용하지 않고 위치 오류와 재검색을 표시한다.
 
-## 구현
+## 사용자 흐름
 
-- `NearbyMapLinks`: Kakao 웹 검색, 좌표 중심 모바일 검색, 차량 위치 핀과 Naver 앱 검색 URI 생성. API 키가 필요 없는 공개 링크 기능만 사용한다.
-- `NearbyMapLauncher`: 사용자가 누를 때만 외부 Activity를 연다. 지정 지도 호스트와 스킴만 허용하고, 호출 직전 호스트의 차량 안전 조건을 재확인한다. 앱이나 브라우저가 없으면 실패를 반환하므로 QR 전달 화면을 계속 사용할 수 있다.
-- `VehicleLocationReader`: 사용자가 선택한 때만 Pleos FusedLocation 1.1.3을 호출한다. 지원 여부와 런타임 권한을 확인하고 12초 이내에 마지막 위치 또는 새 위치 한 번을 받으면 구독과 SDK를 해제한다. 화면 이탈 때 취소하고 이전 요청의 늦은 응답을 버린다.
-- 위치는 메모리에만 둔다. 유효 좌표, 120초 이내 원본 timestamp, 유한한 nonnegative confidence를 확인한다. SDK가 confidence의 단위를 명시하지 않아 이를 미터 정확도로 표시하거나 보행 안전의 근거로 사용하지 않는다.
-- 지역명을 입력하면 그 지역명으로 검색하며 좌표를 URL에 넣지 않는다. Kakao에서 지역명이 없고 유효 차량 좌표가 있을 때만 좌표 중심 검색을 만든다. Naver 검색 문서에는 좌표 중심 파라미터가 없으므로 지역명이 필요하다.
-- 지도 검색과 실제 방문·복귀는 구분한다. 지도 열기를 방문 완료나 도보 활동 완료로 기록하지 않는다. 차량 좌표는 차 밖 사용자의 위치가 아니며 휴대폰 복귀 알림을 제공하지 않는다.
+1. 카페·식사·간식·산책 중 원하는 종류를 고른다.
+2. 최초에는 차량 위치 권한을 요청한다. 허용되면 선택한 종류의 검색을 자동으로 이어간다.
+3. 현재 좌표 주변 1.5km의 실제 장소 중 가까운 후보 최대 3개와 보행 경로를 조회한다.
+4. 카드에서 장소명·주소·가는 시간·오는 시간·체류시간과 남은 충전시간 적합성을 확인한다.
+5. 장소의 가는 길 또는 차량으로 돌아오는 길을 눌러 해당 경로를 QR로 휴대폰에 넘긴다.
 
-## 공개 API 조사
+가게 영업 여부나 실제 보행 여건, 사용자의 복귀를 확인한 것은 아니다. 휴대폰 복귀 알림과 사용자 위치 추적은 구현하지 않았다.
 
-| 제공사 | 확인한 기능 | 다음 통합에 필요한 것 |
-|---|---|---|
-| Kakao | 장소 키워드·카테고리 검색, 도보 경로 `GET /v2/routing/walk` | 개발자 앱/API 활성화와 REST 키, 키를 APK에 넣지 않는 서버, 실제 왕복 경로 및 실패 응답 검증 |
-| Naver | 지역 검색 REST API, 지도 앱 검색·도보 길찾기 URL scheme | 지역 검색용 ID/secret과 서버. 공개 Directions 5 API는 자동차 경로이므로 보행 ETA로 사용하지 않음 |
-| Pleos | 차량 FusedLocation, 차량 Navigation 연동 NaviHelper | 차량 위치 지원·권한·유효 데이터. NaviHelper를 도보 경로 제공 서비스로 해석하지 않음 |
+## 장소·보행 공급자
 
-차량에 네이버 지도 앱이 없을 수 있다. Naver QR는 `nmap://` 스킴이므로 휴대폰에도 네이버 지도 앱이 필요하다. Kakao QR는 HTTPS 링크여서 모바일 웹으로 연결할 수 있다. 외부 지도에서 장소를 고른 뒤 왕복 각각의 보행 시간, 체류 시간과 최소 5분 복귀 여유를 확인한다. 자체 자동 추천은 계정/API 연동과 휴대폰 복귀 흐름 검증 후 확장한다.
+키가 없는 이 Mac의 개발 환경은 **Geofabrik의 실제 대한민국 OSM 추출 데이터 + Valhalla pedestrian 경로**를 사용한다. 원본 지도 기준일은 2026-11-08T21:21:00Z이며 로컬 인덱스를 준비한 뒤 서버를 시작한다. 장소 검색은 로컬에서 수행하고 경로만 네트워크로 조회한다. 만들어 둔 가게 목록이나 샘플 좌표를 실제 현재 위치 결과로 표시하지 않는다. 화면에는 OSM 저작권 링크·공급자·데이터 기준일을 표시하고 지원 범위 밖은 별도로 안내한다.
 
-## 근거
+Overpass 공개 API는 이번 실제 조회에서 응답 시간 초과가 발생했다. 기본 실행에는 사용하지 않으며 개발자가 `NEARBY_USE_OVERPASS=1`로 명시한 경우에만 선택한다. 데이터나 키가 없는 새 환경은 준비 필요 상태를 반환한다.
 
-- [Kakao 지도 웹 URL 가이드](https://apis.map.kakao.com/web/guide/): 검색·위치 핀 URL.
-- [Kakao 모바일 URL scheme](https://apis.map.kakao.com/ios_v2/docs/getting-started/urlscheme/): `search?q=...&p=lat,lng`. HTTPS 주소의 공식 서버 응답도 확인했다(2026-11-10, 모바일 applink로 302).
-- [Kakao REST API](https://developers.kakao.com/docs/en/kakaomap/rest-api): 장소 및 도보 경로. API 인증이나 실제 경로 응답은 아직 실행하지 않았다.
-- [Naver 지도 URL scheme](https://guide.ncloud-docs.com/docs/maps-url-scheme): 앱 검색은 `query`, 호출자 `appname` 사용. 좌표 핀과 검색은 별도 계약이다.
-- [Naver 지역 검색](https://developers.naver.com/docs/serviceapi/search/local/local.md), [Naver Directions 5](https://api.ncloud-docs.com/en/ai-naver-mapsdirections-driving).
-- [Pleos FusedLocation 소개](https://document.pleos.ai/en/docs/pleos-only/connect-sdk-pleos/FusedLocation/intro), [수명 관리](https://document.pleos.ai/en/docs/pleos-only/connect-sdk-pleos/FusedLocation/initialization-and-release), [공식 샘플](https://github.com/Pleos-Playground/pleos-sample-fusedlocation-app).
+카페는 `amenity=cafe`, 식사는 restaurant/fast_food, 간식은 convenience, 산책은 park를 조회한다. 직선거리는 가까운 후보를 고르는 데만 쓰고, 도보시간은 경로 서비스의 두 leg 값으로 계산한다. Valhalla는 차량→장소→차량 순서의 보행 경로에서 양방향 시간을 얻는다. 공원 체류는 기본 10분이며 공원 안에서 검증된 순환 산책 코스를 생성한다는 의미가 아니다. 추출 범위는 이름이 있는 node/way이며 relation-only 장소는 빠질 수 있다. 면 객체의 좌표는 대표 지점이므로 실제 출입구라고 보장하지 않는다.
 
-## 검증 경계
+`server/.env`에 `KAKAO_REST_API_KEY`가 설정되면 Kakao의 장소 검색과 `/v2/routing/walk`를 사용한다. Kakao는 가는 길과 돌아오는 길을 각각 요청한다. 이번 작업에서 Kakao 로그인은 진행하지 않았으며, 키를 APK나 Git에 넣지 않는다. 키가 있는데 인증이 실패하면 실패를 표시하며 임의 장소로 바꾸지 않는다.
 
-`NearbyMapProbe`는 네트워크·위치 조회·외부 UI 없이 URL 인코딩, 지역 검색의 좌표 비포함, 잘못된·오래된 위치 거부, 안전 조건 false에서의 실행 거부를 검사한다. 실제 단말 권한 승인, 차량 위치 수신, 휴대폰 QR 연결 및 외부 지도 검색은 별도 수동 확인 대상이다.
+공개 OSM/Valhalla 인스턴스는 소규모 개발 검증용이다. 요청 수를 제한하고, 과부하·제한 응답을 무시해 반복 요청하지 않는다. 운영 배포는 제공사 사용 조건에 맞는 자체/계약 서버와 운영 인증·한도 설정이 필요하다. 현재 운영용 HTTPS 서버는 배포하지 않았다.
+
+## 시간 비교
+
+총 시간은 `가는 도보시간 + 오는 도보시간 + 체류시간 + 복귀 여유 300초`다. 체류 기본값은 카페 10분, 식사 20분, 간식 5분, 공원 10분이다. 서버 결과를 받은 뒤에도 앱은 현재 남은 충전/출발 시간 예산으로 다시 비교한다.
+
+- `FITS`: 양방향 경로를 받았고 현재 시간 예산 안에 들어온다.
+- `TOO_LONG`: 경로는 확인했지만 현재 시간 예산보다 길다.
+- `UNKNOWN`: 경로는 확인했지만 남은 시간 예산을 알 수 없다.
+- `ROUTE_UNAVAILABLE`: 양방향 보행시간을 확인하지 못했다. 시간에 맞는 추천으로 표시하지 않는다.
+
+원본 차량 위치와 결과는 120초 이내만 사용한다. 오래된 결과는 재검색을 요구한다. 앱의 실제 충전·주행 제한·데이터 신선도 조건은 조회와 지도 열기 직전에도 확인한다.
+
+## 위치·개인정보 경계
+
+`VehicleLocationReader`는 Pleos FusedLocation 1.1.3의 지원 여부와 `pleos.car.permission.FUSED_LOCATION` 런타임 권한을 확인한다. live 구독을 먼저 열고 cached 조회를 별도로 처리하여 캐시가 비었거나 실패해도 live 수신을 기다린다. 12초 내 유효 위치를 받으면 구독과 SDK를 해제한다. 취소·화면 이탈 후 늦은 응답은 버린다.
+
+좌표 범위, 원본 timestamp, 유한한 nonnegative confidence를 검사한다. confidence를 미터 정확도로 해석하지 않는다. Mac·휴대폰의 위치를 차량 위치로 바꾸지 않으며 시연 충전 데이터도 임의 GPS를 만들지 않는다. 에뮬레이터에서는 에뮬레이터에 설정된 차량 위치라는 안내를 붙인다.
+
+카테고리 선택 시 현재 좌표가 지도 서비스에 전달됨을 화면에 알린다. 로컬 인덱스 모드에서 장소 조회는 외부 요청이 없으며, 보행 경로 조회에는 출발·목적 좌표가 Valhalla로 전달된다. 앱 개인화에는 활동 종류·충전시간·SOC만 저장하며 좌표·장소명·지도 결과·실제 방문 이력을 넣지 않는다. BFF는 요청 본문·좌표·키를 일반 로그나 디스크에 기록하지 않고 최대 60초·8개 항목의 메모리 캐시만 사용한다.
+
+## 개발 연결
+
+`python3 scripts/prepare-nearby-pois.py`가 공식 지도와 격리된 Python 의존성을 `.local/maps/`에 내려받고 `south-korea-pois.json`을 생성한다. 데이터 갱신은 `--refresh`를 사용하며 갱신 뒤 서버를 재시작한다. 원본·인덱스·캐시·의존성은 Git에 올리지 않는다.
+
+`./scripts/start-nearby-server.sh`는 Node.js 22 이상으로 `127.0.0.1:3210`의 로컬 서버를 실행한다. 에뮬레이터 연결은 `adb -s VERIFIED_SERIAL reverse tcp:3210 tcp:3210`을 사용한다. 서버를 외부 인터페이스에 노출하거나 공개 운영 서버로 배포하지 않았다.
+
+Debug 앱만 `http://127.0.0.1:3210` 연결을 허용한다. Release는 기본 주소가 비어 있으며 별도 HTTPS 주소를 `-PbinteumNearbyApiBaseUrl=https://...`로 지정해야 한다. 구현된 경로는 `GET /health`, `POST /v1/nearby`이며 상세 계약은 [API 명세](api-spec.md)에 있다.
+
+## 근거와 검증
+
+- [Pleos FusedLocation 소개](https://document.pleos.ai/en/docs/pleos-only/connect-sdk-pleos/FusedLocation/intro), [공식 샘플](https://github.com/Pleos-Playground/pleos-sample-fusedlocation-app): 차량 위치·지원 여부·권한 및 lifecycle.
+- [Geofabrik 대한민국 추출 데이터](https://download.geofabrik.de/asia/south-korea.html), [OSM 저작권](https://www.openstreetmap.org/copyright): 실제 장소 데이터·기준일·귀속 표시.
+- [Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API): 위치·태그별 OSM 데이터 조회와 공개 인스턴스 이용 범위.
+- [Valhalla API](https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/), [FOSSGIS demo](https://valhalla.openstreetmap.de/): pedestrian 경로 및 공급자.
+- [Kakao REST API](https://developers.kakao.com/docs/en/kakaomap/rest-api), [지도 URL 가이드](https://apis.map.kakao.com/web/guide/): 선택적 장소/도보 API와 경로 공유 링크.
+
+서버 fixture 테스트·응답 파서 검사·위치 신선도 검사는 실제 사용자 위치에서의 성공과 구분한다. `LocationCapabilityProbe`는 지원/권한/유효 위치 수신 여부만 보고하고 좌표 자체를 출력하지 않는다. 실제 차량 위치·장소 카드·QR 스캔의 최종 검증 결과는 [구현·검증 기록](implementation-status.md)을 따른다.

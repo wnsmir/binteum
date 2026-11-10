@@ -1,0 +1,8 @@
+{
+  "name": "binteum-nearby-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node --env-file-if-exists=.env src/index.mjs", "test": "node --test" }
+}

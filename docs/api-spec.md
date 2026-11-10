@@ -1,6 +1,45 @@
 # 빈틈의실 API와 데이터 경계
 
-2026년 11월 8일 제안 명세. 현재 저장소에는 HTTP 서버나 실제 공급자 연결이 없다. [OpenAPI 계약](api/openapi.json)은 이후 구현할 BFF의 입출력을 정의하며 실제 배포 주소나 API 키가 아니다.
+2026년 11월 10일 현재 `server/`에 **현재 차량 위치 기반 주변 장소·보행 조회 BFF**를 구현했다. 아래 현재 계약은 코드에 연결되어 있으며, 뒤의 2026-11-08 확장 설계와 [기존 OpenAPI 제안](api/openapi.json)의 4개 경로는 아직 구현되지 않았다. 운영용 HTTPS 서버 배포와 사용자 인증 서버는 별도 후속 범위다.
+
+## 현재 구현된 계약
+
+| 경로 | 요청 | 응답 |
+| --- | --- | --- |
+| `GET /health` | 없음 | 서버 상태, 선택 공급자, `localDevelopmentOnly`; 비밀키나 좌표 없음 |
+| `POST /v1/nearby` | `lat`, `lon`, `category`, `originTimestampMillis`, `availableSeconds`(nullable) | 공급자·출처·원본 위치 시각·조회 시각·복귀 여유와 장소 목록 |
+
+`category`는 `CAFE`, `FOOD`, `CONVENIENCE`, `PARK` 중 하나다. 위치는 유효 좌표이면서 원본 timestamp가 120초 이내여야 한다. 서버와 단말의 시계 오차는 미래 방향으로 최대 10초까지 허용하되 원본 시각을 다시 쓰지 않는다. `availableSeconds`는 현재 충전/출발 예산의 초 단위 값이며, 미확인은 null로 전달한다. 임의 URL, 지역명, 공급자 키, 직접 만든 경로시간을 받지 않는다.
+
+장소 항목은 다음 값을 가진다.
+
+| 값 | 의미 |
+| --- | --- |
+| `id`, `name`, `address`, `latitude`, `longitude`, `url` | 실제 공급자가 반환한 장소와 지도 링크. 없는 주소·영업정보를 만들어내지 않음 |
+| `outboundSeconds`, `returnSeconds` | 각각의 실제 도보 경로시간. 경로 미확인은 null |
+| `staySeconds` | 기본 체류값: 카페/공원 600, 식사 1200, 편의점 300초 |
+| `totalSeconds` | 양방향 보행＋체류＋`returnReserveSeconds` 300초. 경로 미확인 시 null |
+| `fit` | `FITS`, `TOO_LONG`, `UNKNOWN`, `ROUTE_UNAVAILABLE` |
+| `outboundUrl`, `returnUrl` | 확인한 경로를 지도에서 여는 링크. 경로가 없으면 null |
+
+응답 전체에는 `provider`(`OPENSTREETMAP` 또는 `KAKAO`), `attribution`, `generatedAtMillis`, `originTimestampMillis`, `returnReserveSeconds`, `places`가 있다. 가까운 후보 최대 3개를 조회하며 앱은 응답 시각·원본 위치 시각·합계·URL을 검증한다. 표시와 경로 열기 직전에도 **현재** 남은 시간과 위치/결과 신선도로 적합성을 다시 평가한다. 직선거리는 후보 정렬에만 쓰고 보행시간으로 환산하지 않는다.
+
+로컬 추출 데이터 사용 시 `dataSource.kind=LOCAL_OSM_EXTRACT`, `dataSource.datasetTimestamp`, `dataSource.sourceUrl`, `dataSource.coverage=SOUTH_KOREA`를 추가한다. `coverageStatus`는 `WITHIN_COVERAGE` 또는 `OUTSIDE_COVERAGE`이며 범위 밖의 `places`는 빈 목록이다. 다른 공급자 응답에 이 필드가 없으면 앱은 범위를 미확인으로 취급한다.
+
+키가 없고 `.local/maps/south-korea-pois.json`이 있으면 공식 Geofabrik 한국 OSM 추출 데이터에서 반경 내 장소를 찾고 Valhalla의 `pedestrian` 두 leg로 왕복시간을 받는다. 이 Mac에서는 이 모드로 실행한다. 인덱스가 없으면 준비 필요 상태를 반환한다. Overpass는 개발자가 `NEARBY_USE_OVERPASS=1`로 명시한 경우에만 사용하며 이번 공개 API 검증에서는 timeout이 발생했다. `KAKAO_REST_API_KEY`가 서버 환경에 설정되면 Kakao 장소 검색 및 `/v2/routing/walk`를 사용한다. 카카오 로그인은 이번 흐름에서 진행하지 않았으며 앱에 키 입력을 요구하지 않는다. 공개 공급자 연결은 로컬 개발용이고 운영 서비스 이용 조건 확인·배포를 대신하지 않는다. [공급자 근거](nearby-maps.md)
+
+## 현재 연결·개인정보·실패 처리
+
+- Node.js 22 이상의 `./scripts/start-nearby-server.sh`가 `127.0.0.1:3210`에만 바인딩한다. Debug 앱은 `adb reverse tcp:3210 tcp:3210`으로 연결한다. 현재 localhost 서버에는 운영 사용자 인증을 넣지 않았으므로 외부에 공개하지 않는다.
+- Debug의 HTTP 예외는 `127.0.0.1`로 한정한다. Release 기본 주소는 비어 있으며 `-PbinteumNearbyApiBaseUrl=https://...`로 운영 HTTPS 서버를 명시해야 한다. 현재 운영 서버는 배포되지 않았다.
+- 클라이언트가 보낸 임의 주소를 가져오는 프록시가 아니다. 공급자 호스트와 경로를 코드에서 고정하고 redirect·본문 크기·시간·요청 수를 제한한다. 브라우저 Origin 요청은 거부한다.
+- 요청 본문·위치·키를 로그/디스크에 저장하지 않는다. 최대 60초·8개 항목의 메모리 캐시만 둔다. 앱 선택 이력에는 장소·좌표를 넣지 않는다. 사용자 카테고리 선택 화면에는 현재 좌표를 지도 서비스에 전달한다고 표시한다.
+- 위치/입력 오류는 400, 요청 제한은 429, 공급자 인증·응답 실패는 503 계열의 명시적 오류 코드로 구분한다. 실패를 빈 장소 목록이나 모의 위치로 바꾸지 않는다.
+- 한쪽 보행 경로라도 없으면 `ROUTE_UNAVAILABLE`로 남기고 시간에 맞는 추천으로 표시하지 않는다. 실제 장소가 없는 경우만 정상 빈 목록이다. 탭 이탈·재검색은 기존 요청을 취소하고 늦은 응답을 버린다.
+
+## 후속 확장 설계 — 2026-11-08 제안
+
+**아래 내부 컴포넌트와 4개 HTTP 경로는 기존 제안이다. 현재 구현된 `/v1/nearby`와 혼동하지 않는다.**
 
 ## 최소 구조
 

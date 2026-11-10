@@ -79,7 +79,7 @@ class NearbyMapLauncher(private val context: Context, private val canOpen: () ->
     }
 
     private fun isProviderLink(uri: Uri): Boolean = when (uri.scheme) {
-        "https" -> uri.host in setOf("map.kakao.com", "m.map.kakao.com") && uri.userInfo == null
+        "https" -> NearbyResponseParser.mapUri(uri.toString()) != null
         "nmap" -> uri.host == "search" && uri.getQueryParameter("appname") == "com.binteum.app"
         else -> false
     }
