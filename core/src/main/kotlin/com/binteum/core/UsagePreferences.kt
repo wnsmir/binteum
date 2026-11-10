@@ -1,6 +1,12 @@
 package com.binteum.core
 
-enum class UsageCategory { VIDEO, REST, REFLECTION, QUIZ, EXTERNAL_MEDIA }
+enum class UsageCategory {
+    VIDEO, REST, REFLECTION, QUIZ, EXTERNAL_MEDIA, FOOD, WALK, NAP;
+
+    /** A provider launch does not establish playback, arrival, a meal, or a completed walk. */
+    val supportsCompletion: Boolean
+        get() = this == REST || this == REFLECTION || this == QUIZ || this == NAP
+}
 enum class UsageEntryPoint { RECOMMENDED, MANUAL }
 enum class RemainingTimeBucket { UNKNOWN, UNDER_FIVE, FIVE_TO_FIFTEEN, FIFTEEN_TO_THIRTY, THIRTY_PLUS }
 enum class ChargeLevelBand { UNKNOWN, LOW, MIDDLE, HIGH }
@@ -9,6 +15,7 @@ enum class ChargeLevelBand { UNKNOWN, LOW, MIDDLE, HIGH }
  * One explicit app category/activity choice and its charging context.
  * No video IDs, titles, search terms or provider playback events belong in this record.
  * duration/completed describe app-owned activities only; opening a provider is not completion.
+ * A completed NAP means the in-app rest session ended; it does not establish actual sleep.
  */
 data class UsageEvent(
     val id: String,
@@ -45,7 +52,7 @@ object UsagePreferences {
     fun record(events: List<UsageEvent>, event: UsageEvent, maxEvents: Int = 2000): List<UsageEvent> {
         require(maxEvents > 0)
         if (event.id.isBlank()) return events.takeLast(maxEvents)
-        val safeEvent = if (event.category == UsageCategory.VIDEO || event.category == UsageCategory.EXTERNAL_MEDIA)
+        val safeEvent = if (!event.category.supportsCompletion)
             event.copy(durationSeconds = null, completed = null, rating = null) else event.copy(
                 durationSeconds = event.durationSeconds?.coerceAtLeast(0), rating = event.rating.takeIf { event.completed == true })
         return (events.filterNot { it.id == safeEvent.id } + safeEvent).sortedBy { it.atMillis }.takeLast(maxEvents)
@@ -64,7 +71,7 @@ object UsagePreferences {
                 .sumOf { event ->
                     // Unknown durations form their own bucket; never teach a "short wait" preference.
                     val sameCharge = chargeBand(event.stateOfCharge) == band
-                    val ownContent = category != UsageCategory.VIDEO && category != UsageCategory.EXTERNAL_MEDIA
+                    val ownContent = category.supportsCompletion
                     val feedback = if (ownContent && event.completed == true) when (event.rating) {
                         ActivityRating.LIKE -> 2.0
                         ActivityRating.DISLIKE -> -4.0

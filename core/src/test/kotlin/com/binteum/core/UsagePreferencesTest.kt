@@ -39,12 +39,31 @@ class UsagePreferencesTest {
     }
 
     @Test fun `provider choices never retain playback durations or inferred completions`() {
-        for (category in listOf(UsageCategory.VIDEO, UsageCategory.EXTERNAL_MEDIA)) {
+        for (category in listOf(UsageCategory.VIDEO, UsageCategory.EXTERNAL_MEDIA, UsageCategory.FOOD, UsageCategory.WALK)) {
             val saved = UsagePreferences.record(emptyList(), event("1", category).copy(durationSeconds = 600, completed = true, rating = ActivityRating.LIKE)).single()
             assertNull(saved.durationSeconds)
             assertNull(saved.completed)
             assertNull(saved.rating)
         }
+    }
+
+    @Test fun `food and walk provider events cannot gain ranking weight from forged completion`() {
+        for (category in listOf(UsageCategory.FOOD, UsageCategory.WALK)) {
+            val forged = event("1", category).copy(completed = true, rating = ActivityRating.LIKE)
+            val neutral = event("2", UsageCategory.VIDEO)
+            // Same-context choices tie; unsupported completion must not beat the default order.
+            assertEquals(UsageCategory.VIDEO, UsagePreferences.rank(listOf(forged, neutral), 600, 65,
+                listOf(UsageCategory.VIDEO, category)).first())
+        }
+    }
+
+    @Test fun `nap sessions retain explicit app completion and use charging context`() {
+        val initial = event("1", UsageCategory.NAP, remaining = 1500)
+        val saved = UsagePreferences.record(emptyList(), initial.copy(durationSeconds = 600, completed = true)).single()
+        assertEquals(600, saved.durationSeconds)
+        assertEquals(true, saved.completed)
+        assertEquals(UsageCategory.NAP, UsagePreferences.rank(listOf(saved), 1500, 65).first())
+        assertEquals(UsageCategory.VIDEO, UsagePreferences.rank(listOf(saved), 200, 65).first())
     }
 
     @Test fun `explicit own activity dislike ranks below a neutral category`() {

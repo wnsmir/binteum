@@ -1,6 +1,8 @@
 # 빈틈의실 — Pleos 공개 API 조사·연동 매트릭스
 
-확인일: 2026-11-08. 기준: 공모전 공식 홈페이지가 연결하는 최신 Pleos 문서, 공식 샘플, Maven의 `Vehicle:2.3.2` 배포물. 이 문서는 **문서에 있는 기능, 배포물에 있는 메서드, 실행 환경의 capability, 우리 앱에서 검증한 동작을 구분**한다. 모든 API를 실차나 에뮬레이터에서 실행했다는 뜻이 아니다.
+정적 목록 확인일: 2026-11-08. 앱 연결 갱신: 2026-11-10. 기준: 공모전 공식 홈페이지가 연결하는 Pleos 문서, 공식 샘플, Maven의 `Vehicle:2.3.2` 배포물. 이 문서는 **문서에 있는 기능, 배포물에 있는 메서드, 실행 환경의 capability, 우리 앱에서 검증한 동작을 구분**한다. 모든 API를 실차나 에뮬레이터에서 실행했다는 뜻이 아니다.
+
+2026-11-10에는 `FusedLocation:1.1.3`의 요청별 차량 위치와 `ComfortController`의 명시적 공조 온도 적용/복원을 추가했다. 위치는 지역 검색·차량 핀 QR에만 사용하고 저장하지 않는다. 공조는 지원 구역·온도와 권한, AAOS P단·속도 0, 앱 안전 상태를 확인하고 별도 readback으로 검증한다. 시트 이동은 구현하지 않았다. 실제 위치 수신·공조 쓰기와 QR 연결은 수동 검증 대상으로 남는다. 지도 제공사 기능은 [지도 구현 근거](nearby-maps.md)를 참고한다.
 
 ## 확인 범위와 숫자 차이
 
@@ -27,11 +29,14 @@
 | 차량 충전 예상 잔여 시간 | `EV_CHARGE_TIME_REMAINING`의 Int 초·원본 timestamp | `android.car.permission.CAR_ENERGY`, 읽기 capability 및 CONTINUOUS 샘플 | 2026-11-10 선택 읽기 연결. 실제 충전 중이고 원본 샘플이 30초 이내인 양수 값만 전달. 0·미지원·실패는 예상시간 미확인으로 처리 |
 | 차량의 목표 충전량 | `EV_CHARGE_PERCENT_LIMIT`의 Float % | 같은 AAOS 읽기 권한 및 읽기 capability | 2026-11-10 읽기 연결. 현재 모델은 정확한 정수 1..100%만 수용하며 앱에서 고른 목표와 구분 |
 | 명시적 차량 목표 적용 | Pleos `checkEvChargePercentLimitCapabilities`, `setEvChargePercentLimit` + AAOS 현재 값 재조회 | `pleos.car.permission.CONTROL_CAR_ENERGY` normal 권한, READ_WRITE capability, 지원 목표값, 신선한 안전 상태 | 사용자 적용 동작에서만 호출. 8초 안에 별도 readback이 일치해야 성공. timeout은 미적용 보장이 아니라 적용 여부 미확인. 충전 시작/중지·전류 제어는 호출하지 않음 |
+| 공조 설정 온도 | `checkHvacTemperatureCapabilities`, `getHvacTemperature`, `setHvacTemperature` + 별도 재조회 | Pleos `CAR_CLIMATE`/`CONTROL_CAR_CLIMATE`, READ_WRITE·지원 구역/온도. AAOS `CAR_POWERTRAIN`/`CAR_SPEED`로 P·정지 확인 | 사용자 적용/복원 버튼에서만 호출. 원래 값과 마지막 앱 요청값을 보관하고 외부 변경이 있으면 복원으로 덮지 않음. 낮잠/앱 lifecycle의 자동 쓰기 없음. 실제 쓰기 미검증 |
+| 시트 등받이 위치 | `checkSeatBackrestAnglePositionCapabilities`, `getCurrentSeatBackrestAnglePosition` | Pleos `CAR_SEATS`, 읽기 지원 영역 | 지원 진단의 원시 위치 읽기만 연결. 숫자를 각도·퍼센트로 해석하지 않음. 연속 MOVE와 정지 동작의 검증 없이 자동 젖힘/복원 명령을 보내지 않음 |
+| 차량 위치 | FusedLocation `isSupported`, `initialize`, `getLastKnownLocation`, 구독/해제, `release` | Pleos `FUSED_LOCATION` 런타임 허가 | 사용자 요청별 최대 12초. 원본 timestamp 120초 이내·유효 좌표만 받고 메모리에 유지. 차량 위치는 휴대폰 위치가 아니며 영역 알림/백그라운드 추적 미사용 |
 | 주행 UX 제한 | `CarUxRestrictionsManager.registerListener`, `getCurrentCarUxRestrictions`, `unregisterListener` | AAOS Car Service 연결 | DO 필요 또는 baseline 이외 제한이 하나라도 있으면 보수적으로 잠금. 미확인도 사용 허가로 처리하지 않음. 기어 P/브레이크로 추론하지 않음 |
 | 활성 상태 | `PowerManager.isInteractive`, 화면 on/off, 소유 Activity의 start/stop | Android 디바이스 상태 | 기존 `vehicleAwake` 필드는 현재 디바이스에서 UI를 관측 가능한 상태인지 나타내는 대용값. **실제 IGN 신호가 아님** |
 | 실패·재시작 | 세션/읽기 식별자, 제한 시간, release | callback이 오지 않을 수도 있음 | capability 20초, 읽기 3초 timeout; 정상 읽기 종료 후 3초 간격. timeout 뒤 무한 재요청하지 않고 재연결 필요. 종료 뒤 늦은 callback 무시 |
 
-코드: [PleosVehicleDataSource](../app/src/main/java/com/binteum/app/vehicle/PleosVehicleDataSource.kt), [AndroidCarUxReader](../app/src/main/java/com/binteum/app/vehicle/AndroidCarUxReader.kt). SDK 시그니처를 사용하는 `:app:compileDebugKotlin`과 `:app:lintDebug`가 통과했다. 이 문서 작성 시점의 API 조사/연동 담당 검증은 **빌드·정적 검사까지**다. 에뮬레이터의 실제 capability/허가/반환값, 실차 동작, 앱 마켓 승인 완료는 별도 기록이 필요하다.
+코드: [PleosVehicleDataSource](../app/src/main/java/com/binteum/app/vehicle/PleosVehicleDataSource.kt), [AndroidCarUxReader](../app/src/main/java/com/binteum/app/vehicle/AndroidCarUxReader.kt), [ComfortController](../app/src/main/java/com/binteum/app/vehicle/ComfortController.kt), [VehicleLocationReader](../app/src/main/java/com/binteum/app/nearby/VehicleLocationReader.kt). 최신 빌드·기기 결과는 [구현·검증 기록](implementation-status.md)을 따른다. 정적 검사 통과와 에뮬레이터 capability/허가/실제 반환값, 실차 동작, 앱 마켓 승인은 별개다.
 
 ### 충전 스위치와 실제 상태를 나눈 이유
 
@@ -59,7 +64,7 @@ Pleos의 [`getEvChargeSwitchState`](https://document.pleos.ai/docs/pleos-only/co
 
 ## Vehicle 19개 영역 요약
 
-아래 `C/R/W/S/U`는 capability 확인 / 읽기 / 제어 / 구독 / 구독 해제를 뜻한다. 실제 지원은 연결된 차량의 capability 및 area/bounds에 따른다. 모든 영역의 배포물 메서드를 정적으로 확인했지만, 빈틈의실은 EV 데이터 읽기와 명시적 목표량 설정을 연결한다. 다른 영역은 앱에서 호출하지 않는다.
+아래 `C/R/W/S/U`는 capability 확인 / 읽기 / 제어 / 구독 / 구독 해제를 뜻한다. 실제 지원은 연결된 차량의 capability 및 area/bounds에 따른다. 모든 영역의 배포물 메서드를 정적으로 확인했지만, 빈틈의실은 EV 읽기·목표량 설정, 공조 온도 읽기/설정과 시트 등받이 원시 위치 읽기를 연결한다. 그 밖의 영역은 현재 호출하지 않는다.
 
 | 영역 | 메서드 수 (C/R/W/S/U) | 확인한 기능 | 필요한 권한 종류 | 앱 활용 |
 | --- | --- | --- | --- | --- |
@@ -70,11 +75,11 @@ Pleos의 [`getEvChargeSwitchState`](https://document.pleos.ai/docs/pleos-only/co
 | [DrivingMode](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/driving-mode/entry) | 12 (3/3/0/3/3) | 주행 모드·크루즈 상태/목표 속도 | `CAR_DRIVE` | 주행 제한은 이 값이 아니라 AAOS UX를 사용 |
 | [EvBattery](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/entry) | 30 (9/7/4/5/5) | SOC·충전 요청 스위치/한도·전비 | `CAR_ENERGY` / `CONTROL_CAR_ENERGY` | SOC+요청 스위치 읽기 및 명시적 목표량 설정. 실제 상태·ETA·목표 readback은 AAOS |
 | [Fuel](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/fuel/entry) | 20 (5/5/0/5/5) | 연료 비율·현재/구간/누적 연비 | `CAR_ENERGY` | EV 중심 MVP에서 제외 |
-| [HVAC](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/entry) | 72 (14/15/13/15/15) | 에어컨·자동/순환·제상·팬·전원·온도·공기청정 | `CAR_CLIMATE` / `CONTROL_CAR_CLIMATE` | 휴식 연출용 자동 제어 제외, 추후 명시적 사용자 기능만 검토 |
+| [HVAC](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/entry) | 72 (14/15/13/15/15) | 에어컨·자동/순환·제상·팬·전원·온도·공기청정 | `CAR_CLIMATE` / `CONTROL_CAR_CLIMATE` | 명시적 온도 적용/복원과 readback 연결. 전원·팬·제상 등 다른 설정은 변경하지 않음 |
 | [Light](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/light/entry) | 71 (19/19/11/11/11) | 실내/독서/전조/안개/후미·무드등·주행모드 연동 | `CAR_LIGHTS` / `CONTROL_CAR_LIGHTS` | 분위기 자동 제어 제외 |
 | [Odometer](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/odometer/entry) | 30 (9/7/0/7/7) | 누적 거리·구간 시간/거리 | `CAR_DRIVE` | 오래 운전한 뒤 휴식 제안 후보, 현재 미사용 |
 | [Safety](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/safety/entry) | 33 (9/8/0/8/8) | 유체·에어백·벨트·경고 상태 | `CAR_SAFETY` | OEM 경고 대체 금지, 현재 미사용 |
-| [Seat](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/entry) | 86 (27/15/14/15/15) | 착좌/벨트·시트/헤드레스트 위치·이동·메모리·열선/통풍 | `CAR_SEATS` / `CONTROL_CAR_SEATS` | 움직이는 시트 자동 제어 제외; 휴식 자세는 콘텐츠로 제공 |
+| [Seat](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/entry) | 86 (27/15/14/15/15) | 착좌/벨트·시트/헤드레스트 위치·이동·메모리·열선/통풍 | `CAR_SEATS` / `CONTROL_CAR_SEATS` | 등받이 원시 위치의 읽기만 연결. 시트 이동·자동 복원 없음 |
 | [SideMirror](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/side-mirror/entry) | 5 (1/1/1/1/1) | 사이드미러 열선 | `CAR_CLIMATE` / `CAR_MIRRORS` / `CONTROL_CAR_MIRRORS` | 앱 목적상 미사용 |
 | [SteeringWheel](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/steering-wheel/entry) | 9 (2/2/1/2/2) | 스티어링 각도·열선 | `CAR_CLIMATE` / `CAR_DRIVE` / `CONTROL_CAR_CLIMATE` | 각도로 정차/운전 여부를 추론하지 않음 |
 | [Tire](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/tire/entry) | 2 (1/1/0/0/0) | 저압 상태 | `CAR_SAFETY` | 안전 경고 대체하지 않음 |
@@ -88,8 +93,8 @@ Pleos의 [`getEvChargeSwitchState`](https://document.pleos.ai/docs/pleos-only/co
 | 모듈 | 공식 기준 버전·공개 기능 | 권한/제약 | 빈틈의실 적용·검증 상태 |
 | --- | --- | --- | --- |
 | [NaviHelper](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/NaviHelper/intro) | 3.0.5. 차량 목적지·경유지·경로 옵션·재탐색, 경로/위치/안내/충전사업자 정보, 차량 내 Navigation 화면 | `NAVI_ROUTE`, 경로 변경 `NAVI_ROUTE_SEARCH`, 화면 `NAVI_CUSTOM_MAP`. **차량 Navigation 연동** | 문서+배포 소스 확인. 앱 미연결. 보행 경로/주변 POI 서비스나 휴대폰 내비로 대체하지 않음 |
-| [FusedLocation](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/FusedLocation/intro) | 1.1.3. 차량 마지막 위치, 위치 구독, 영역 진입/이탈, 지원 여부 | `pleos.car.permission.FUSED_LOCATION`; `isSupported` 선확인; 위치 null·timestamp·신뢰도 검사 | 문서+배포 소스 확인. 앱 미연결. **차량 위치는 차 밖 사람의 휴대폰 위치가 아님** |
-| [TextToSpeech](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/TextToSpeech/intro) | 3.3.1. 합성/중지, locale·speaker·audio attributes·zone, 이벤트 | `TTS_SERVICE`; HYBRID/SERVER는 My Project 자격 증명과 앱 등록, ON_DEVICE는 서버 등록 불필요 | 문서+AAR 시그니처 확인. 앱 미연결. 오디오 포커스·Suspend 처리가 별도로 필요 |
+| [FusedLocation](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/FusedLocation/intro) | 1.1.3. 차량 마지막 위치, 위치 구독, 영역 진입/이탈, 지원 여부 | `pleos.car.permission.FUSED_LOCATION`; `isSupported` 선확인; 위치 null·timestamp·신뢰도 검사 | 사용자 요청별 one-shot 위치 연결, 12초 제한·수명 해제·원본 freshness 검사. 실제 수신 미검증. **차량 위치는 차 밖 사람의 휴대폰 위치가 아님** |
+| [TextToSpeech](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/TextToSpeech/intro) | 3.3.1. 합성/중지, locale·speaker·audio attributes·zone, 이벤트 | `TTS_SERVICE`; HYBRID/SERVER는 My Project 자격 증명과 앱 등록, ON_DEVICE는 서버 등록 불필요 | 실험용 미리 듣기 연결. 엔진/프로젝트 권한 문제로 정상 합성 미검증. 낮잠 기상음은 별도 Android ToneGenerator 사용 |
 | [SpeechToText](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/SpeechToText/intro) | 3.3.1. 인식 시작/중지, 결과, audio 전송/종료, locale | `STT_SERVICE`; 모드별 등록·네트워크 조건은 TTS와 유사 | 문서+AAR 시그니처 확인. 앱 미연결. 받아쓴 텍스트를 반환하는 기능이며 명령 실행 자체가 아님 |
 | [Gleo Interface](https://document.pleos.ai/docs/pleos-only/app-integration-guide/guide/core-concepts) | App Schema로 앱 함수를 등록하고 Intent를 받아 callback broadcast로 응답 | [App Schema](https://document.pleos.ai/docs/pleos-only/app-integration-guide/guide/app-capability)는 최대 3개 action, 영어 description. [응답](https://document.pleos.ai/docs/pleos-only/app-integration-guide/guide/action_callback)은 success/asking/fail, 제한 시간 7초 | 계획 단계. `SHOW_CHARGING_STATUS`, `RECOMMEND_ACTIVITY`, `END_BREAK` 같은 앱 기능 후보. 실제 등록·음성 end-to-end 검증 미완료 |
 
@@ -115,9 +120,9 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | 하드키·회전 입력 | [CCP 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/ccp-rotary-controller-development) | 사용자 설치 앱의 CCP 지원은 선택 가능. 터치로 필수 기능 완결, 미지원 메타데이터/최상위 Back hide 처리 확인 필요 |
 | 차량 미디어 통합 | [Music/Audio 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/music-audio-app-developement-guide) | 오디오를 주기능으로 배포한다면 MediaBrowserService/MediaSession 등 카테고리 요구 별도 검증. 부가 짧은 영상 기능만으로 차량 미디어 통합 완료라 하지 않음 |
 | 지도 화면 | [Maps/Navigation 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/navigation-app-development-guide) | 지도/내비 앱 분류 정책과 NaviHelper 기능은 별개. 외부 장소·보행 제공사 API를 사용할 권한도 별개 |
-| 휴대폰 QR 전달 | 현재 5개 SDK의 공개 기능에 휴대폰 동기화·푸시 전달 보장 없음 | URL/QR·앱링크는 별도 웹/휴대폰 기능으로 설계. 전달 성공·실제 사람 위치·전화기 알림 권한 검증 전 외출 안전 약속 금지 |
+| 휴대폰 QR 전달 | 현재 5개 SDK의 공개 기능에 휴대폰 동기화·푸시 전달 보장 없음 | 외부 지도 검색/차량 핀 QR를 로컬 생성. 실제 스캔 검수는 남아 있으며 휴대폰 동기화·복귀 알람은 미구현 |
 | IGN OFF 뒤 충전 알림 | 공개 문서에서 일반 앱의 지속 실행·원격 SOC 수신 보장 미확인 | 차량 foreground 관측과 차 밖 원격 감시를 분리. 휴대폰/서버 중계·차량 데이터 전송 근거를 별도로 검증해야 함 |
-| 주변 장소·도보 왕복 | Pleos FusedLocation은 차량 좌표, NaviHelper는 차량 내 내비. 도보 왕복/영업시간은 현재 모듈에서 확인 못함 | 별도 장소/경로 provider 기술 검증 계획을 따름. 왕복 각 경로+체류+복귀 여유를 측정하며 경로를 LLM으로 만들어내지 않음 |
+| 주변 장소·도보 왕복 | Pleos FusedLocation은 차량 좌표, NaviHelper는 차량 내 내비. 도보 왕복/영업시간은 현재 모듈에서 확인 못함 | 지도 링크와 사용자가 확인·입력한 왕복 각 시간+체류+5분 여유 비교를 구현. 장소·도보 API 자동 호출은 미구현 |
 
 ## 문서와 배포물의 차이
 
@@ -133,11 +138,11 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | Seat | [check-seat-backrest-angle-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-backrest-angle-capabilities), [check-seat-belt-height-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-belt-height-capabilities), [check-seat-depth-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-depth-capabilities), [check-seat-fore-aft-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-fore-aft-capabilities), [check-seat-headrest-angle-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-headrest-angle-capabilities), [check-seat-headrest-fore-aft-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-headrest-fore-aft-capabilities), [check-seat-headrest-height-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-headrest-height-capabilities), [check-seat-height-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-height-capabilities), [check-seat-lumbar-fore-aft-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-lumbar-fore-aft-capabilities), [check-seat-lumbar-side-support-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-lumbar-side-support-capabilities), [check-seat-tilt-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-tilt-capabilities) |
 | Tire | [check-wheel-area-capabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/tire/check-wheel-area-capabilities) |
 
-차량 기종·area별 capability는 런타임의 `AccessType.NONE/READ/WRITE/READ_WRITE` 및 실제 반환 bounds로 확인한다. 예를 들어 창문/시트 숫자를 무조건 0..100 퍼센트로 해석하지 않는다. 이번 앱에는 어떤 차량 제어 메서드도 연결하지 않았다.
+차량 기종·area별 capability는 런타임의 `AccessType.NONE/READ/WRITE/READ_WRITE` 및 실제 반환 bounds로 확인한다. 예를 들어 창문/시트 숫자를 무조건 0..100 퍼센트로 해석하지 않는다. 현재 차량 쓰기는 명시적 충전 목표와 공조 온도 적용/복원에 한정한다.
 
 ## Vehicle 전체 메서드 목록 — 배포물 확인 440개
 
-모든 행의 `정적 확인`은 SDK 소스와 AAR 메타데이터에서 존재·공개 분류를 확인했다는 뜻이다. 모든 행의 `차량 실행` 기본 상태는 **미검증**이다. `앱 연결` 네 행만 빈틈의실 코드에서 호출하며, 해당 행도 실제 기기 검증과 별개다. `C`가 성공해도 모든 읽기/제어 성공을 보장하지 않으며 area와 accessType을 확인해야 한다. 권한은 `pleos.car.permission.` 접두사를 생략했다. 오버로드는 서명 차이를 괄호에 적었다.
+모든 행의 `정적 확인`은 SDK 소스와 AAR 메타데이터에서 존재·공개 분류를 확인했다는 뜻이다. 모든 행의 `차량 실행` 기본 상태는 **미검증**이다. 아래 목록의 앱 연결 표시는 2026-11-08 조사 기반에 현재 연결 메서드를 갱신한 것이며, 실제 실행 검증과 별개다. `C`가 성공해도 모든 읽기/제어 성공을 보장하지 않으며 area와 accessType을 확인해야 한다. 권한은 `pleos.car.permission.` 접두사를 생략했다. 오버로드는 서명 차이를 괄호에 적었다.
 
 
 ### Brake — 4개
@@ -210,7 +215,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [checkCurrentEvEfficiencyCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-current-ev-efficiency-capabilities) | C | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [checkEvBatteryStateOfChargeCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-battery-state-of-charge-capabilities) | C | `CAR_ENERGY` | 확인 / 연결 / 미검증 |
 | [checkEvChargeCurrentDrawLimitCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-charge-current-draw-limit-capabilities) | C | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
-| [checkEvChargePercentLimitCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-charge-percent-limit-capabilities) | C | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
+| [checkEvChargePercentLimitCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-charge-percent-limit-capabilities) | C | `CAR_ENERGY` | 확인 / 연결 / 지원값 수신 확인 |
 | [checkEvChargePortOpenCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-charge-port-open-capabilities) | C | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [checkEvChargeSwitchCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-ev-charge-switch-capabilities) | C | `CAR_ENERGY` | 확인 / 연결 / 미검증 |
 | [checkInstantaneousEvEfficiencyCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/check-instantaneous-ev-efficiency-capabilities) | C | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
@@ -278,7 +283,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [checkHvacMaxDefrostCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-max-defrost-capabilities) | C | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [checkHvacPowerCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-power-capabilities) | C | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [checkHvacRecirculationCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-recirculation-capabilities) | C | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
-| [checkHvacTemperatureCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-temperature-capabilities) | C | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
+| [checkHvacTemperatureCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-temperature-capabilities) | C | `CAR_CLIMATE` | 확인 / 연결 / 에뮬레이터 READ_WRITE·앞좌석 2구역·15–30°C(0.5 간격) 확인 |
 | [checkHvacTemperatureCurrentCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/check-hvac-temperature-current-capabilities) | C | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [getHvacAcState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-ac-state) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [getHvacAirCleanerState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-air-cleaner-state) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
@@ -292,7 +297,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [getHvacMaxDefrostState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-max-defrost-state) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [getHvacPowerState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-power-state) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [getHvacRecirculationState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-recirculation-state) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
-| [getHvacTemperature](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-temperature) | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
+| [getHvacTemperature](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-temperature) | R | `CAR_CLIMATE` | 확인 / 연결 / 에뮬레이터 읽기 예외·미확인 |
 | [getHvacTemperatureCurrent](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-temperature-current) — `( area: SeatArea, onComplete: (Float?) -> Unit, onFailed: (Exception) -> Unit )` | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [getHvacTemperatureCurrent](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/get-hvac-temperature-current) — `( area: SeatArea, unit: TemperatureUnit, onComplete: (Float?) -> Unit, onFailed: (Exception) -> Unit )` | R | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [registerHvacAcState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/register-hvac-ac-state) | S | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
@@ -322,7 +327,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [setHvacMaxDefrost](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/set-hvac-max-defrost) | W | `CONTROL_CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [setHvacPower](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/set-hvac-power) | W | `CONTROL_CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [setHvacRecirculation](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/set-hvac-recirculation) | W | `CONTROL_CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
-| [setHvacTemperature](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/set-hvac-temperature) | W | `CONTROL_CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
+| [setHvacTemperature](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/set-hvac-temperature) | W | `CONTROL_CAR_CLIMATE` | 확인 / 명시적 적용+readback 연결 / 실제 쓰기 미검증 |
 | [unregisterHvacAcState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/unregister-hvac-ac-state) | U | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [unregisterHvacAirCleanerState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/unregister-hvac-air-cleaner-state) | U | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
 | [unregisterHvacAutoRecirculationState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/unregister-hvac-auto-recirculation-state) | U | `CAR_CLIMATE` | 확인 / 미연결 / 미검증 |
@@ -503,7 +508,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [checkMoveSeatLumbarForeAftCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-move-seat-lumbar-fore-aft-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkMoveSeatLumbarSideSupportCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-move-seat-lumbar-side-support-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkMoveSeatTiltCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-move-seat-tilt-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
-| [checkSeatBackrestAnglePositionCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-backrest-angle-position-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
+| [checkSeatBackrestAnglePositionCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-backrest-angle-position-capabilities) | C | `CAR_SEATS` | 확인 / 읽기 진단 연결 / 미검증 |
 | [checkSeatBeltBuckledCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-belt-buckled-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkSeatBeltHeightPositionCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-belt-height-position-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkSeatDepthPositionCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-depth-position-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
@@ -519,7 +524,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [checkSeatTemperatureCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-temperature-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkSeatTiltPositionCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-tilt-position-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [checkSeatVentilationCapabilities](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-seat-ventilation-capabilities) | C | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
-| [getCurrentSeatBackrestAnglePosition](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/get-current-seat-backrest-angle-position) | R | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
+| [getCurrentSeatBackrestAnglePosition](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/get-current-seat-backrest-angle-position) | R | `CAR_SEATS` | 확인 / 읽기 진단 연결 / 미검증 |
 | [getCurrentSeatBeltBuckledState](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/get-current-seat-belt-buckled-state) | R | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [getCurrentSeatBeltHeightPosition](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/get-current-seat-belt-height-position) | R | `CAR_SEATS` | 확인 / 미연결 / 미검증 |
 | [getCurrentSeatDepthPosition](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/get-current-seat-depth-position) | R | `CAR_SEATS` | 확인 / 미연결 / 미검증 |

@@ -10,7 +10,7 @@ import android.graphics.drawable.Drawable
 
 enum class AppIcon {
     DASHBOARD, PLAY, SETTINGS, SUN, MOON, SYSTEM, BATTERY, CLOCK, LEAF, SPARKLES,
-    QUIZ, ARROW_RIGHT, BACK, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT,
+    QUIZ, ARROW_RIGHT, BACK, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT, MAP, COFFEE, BED,
 }
 
 /** Original outline symbols on a shared 24-unit grid; no font or external asset. */
@@ -42,6 +42,20 @@ class IconDrawable(private val icon: AppIcon, color: Int, private val sizePx: In
             paint.style = Paint.Style.STROKE
         }
         when (icon) {
+            AppIcon.MAP -> {
+                path { moveTo(3f, 5f); lineTo(9f, 3f); lineTo(15f, 5f); lineTo(21f, 3f); lineTo(21f, 19f); lineTo(15f, 21f); lineTo(9f, 19f); lineTo(3f, 21f); close() }
+                line(9f, 3f, 9f, 19f); line(15f, 5f, 15f, 21f)
+            }
+            AppIcon.COFFEE -> {
+                path { moveTo(4f, 8f); lineTo(17f, 8f); lineTo(17f, 15f); quadTo(17f, 19f, 13f, 19f); lineTo(8f, 19f); quadTo(4f, 19f, 4f, 15f); close() }
+                path { moveTo(17f, 9f); lineTo(20f, 9f); cubicTo(24f, 9f, 23f, 15f, 17f, 15f) }
+                line(3f, 22f, 20f, 22f); line(8f, 2f, 8f, 4f); line(13f, 2f, 13f, 4f)
+            }
+            AppIcon.BED -> {
+                line(3f, 7f, 3f, 21f); line(21f, 12f, 21f, 21f); line(3f, 17f, 21f, 17f)
+                canvas.drawRoundRect(5f, 10f, 10f, 15f, 1f, 1f, paint)
+                path { moveTo(12f, 15f); lineTo(12f, 9f); lineTo(18f, 9f); quadTo(21f, 9f, 21f, 12f) }
+            }
             AppIcon.DASHBOARD -> {
                 canvas.drawRoundRect(3f, 3f, 10f, 10f, 1.6f, 1.6f, paint)
                 canvas.drawRoundRect(14f, 3f, 21f, 10f, 1.6f, 1.6f, paint)

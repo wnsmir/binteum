@@ -29,6 +29,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.binteum.app.media.WebMediaPanel
 import com.binteum.app.vehicle.PleosVehicleDataSource
+import com.binteum.app.vehicle.ComfortController
+import com.binteum.app.nearby.*
 import com.binteum.app.ui.*
 import com.binteum.core.*
 import org.json.JSONArray
@@ -105,6 +107,30 @@ class MainActivity : Activity() {
     private var estimateSourceLabel: TextView? = null
     private var goalLabel: TextView? = null
     private var pendingVideoEntry = UsageEntryPoint.MANUAL
+    private var nearbyArea = ""
+    private var nearbyProvider = MapProvider.KAKAO
+    private var nearbyFix: VehicleLocationFix? = null
+    private var nearbyNote = ""
+    private lateinit var locationReader: VehicleLocationReader
+    private lateinit var comfort: ComfortController
+    private var outboundMinutes = 5
+    private var returnMinutes = 5
+    private var stayMinutes = 10
+    private var routeConfirmed = false
+    private var nearbyBudgetLabel: TextView? = null
+    private var napDurationMinutes = 15
+    private var nap: NapSession? = null
+    private var napChoiceId: String? = null
+    private var napEntry = UsageEntryPoint.MANUAL
+    private var napLabel: TextView? = null
+    private var napPlanLabel: TextView? = null
+    private var napStartButton: Button? = null
+    private var napRemainingSeconds = 0
+    private var nearbyEntry = UsageEntryPoint.MANUAL
+    private var napNote = ""
+    private var beforeNapBrightness = -1f
+    private var selectedTemperature = 22f
+    private val napChime by lazy { com.binteum.app.audio.NapChime(this) { resumed && started } }
     private var vehicleTargetButton: Button? = null
     private var session = ChargingSession(80, targetEnabled = false)
     private var status = SessionStatus.WAITING_FOR_DATA
@@ -175,6 +201,8 @@ class MainActivity : Activity() {
             if (!safeToConfigure()) completionVoice.stop()
             updateLabels()
             refreshMediaGate()
+            tickNap()
+            updateNearbyBudget()
             if (tab == 0 && allowed() && active == null && recovery == null && completed == null &&
                 windowContentKey() != lastWindowContentKey) render(preserveScroll = true)
             handler.postDelayed(this, 1_000)
@@ -184,7 +212,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tab = savedInstanceState?.getInt("tab", 0) ?: 0
-        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..3 }?.takeLast(16)?.forEach(screenHistory::addLast)
+        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..5 }?.takeLast(16)?.forEach(screenHistory::addLast)
         activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
         themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
@@ -219,6 +247,8 @@ class MainActivity : Activity() {
             pendingVideoEntry = UsageEntryPoint.MANUAL
         }
         source = makeSource()
+        locationReader = VehicleLocationReader(this)
+        comfort = ComfortController(this) { !demoMode && safeToConfigure() && tab == 5 && nap == null }
         restoreCheckpoint()
         session = ChargingSession(target, targetEnabled = false)
         render()
@@ -227,6 +257,7 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         started = true
+        routeConfirmed = false
         snapshot = null
         chargePlanner.reset()
         status = SessionStatus.WAITING_FOR_DATA
@@ -235,10 +266,13 @@ class MainActivity : Activity() {
         render()
         source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
         if (demoMode) emitDemoScenario()
+        comfort.start { if (started && tab == 5) render(preserveScroll = true) }
         handler.post(ticker)
     }
 
     override fun onPause() {
+        if (nap != null) endNap(false, tx("화면을 벗어나 휴식을 종료했어요. 기상 알림도 중지됐어요.", "Rest ended when this screen was left. The wake cue was stopped."))
+        napChime.stop()
         resumed = false
         completionVoice.stop()
         ambientBackground.setActive(false)
@@ -254,6 +288,7 @@ class MainActivity : Activity() {
         resumed = true
         snapshot?.let(::acceptSnapshot)
         render()
+        if (tab == 5 && !demoMode && nap == null) comfort.refresh()
     }
 
     override fun onStop() {
@@ -263,6 +298,8 @@ class MainActivity : Activity() {
         active?.let { recovery = it; active = null }
         saveCheckpoint()
         source.stop()
+        comfort.stop()
+        locationReader.cancel()
         super.onStop()
     }
 
@@ -282,6 +319,7 @@ class MainActivity : Activity() {
     private fun makeSource(): VehicleDataSource = if (demoMode) DemoVehicleDataSource() else PleosVehicleDataSource(this)
 
     private fun acceptSnapshot(value: VehicleSnapshot) {
+        if (snapshot?.charging != true && value.charging == true) routeConfirmed = false
         if (snapshot?.charging == false && value.charging == true && departureAtMillis?.let { it <= System.currentTimeMillis() } == true) {
             departureAtMillis = null; prefs.edit().remove("departureAtMillis").apply()
         }
@@ -384,7 +422,8 @@ class MainActivity : Activity() {
         try {
             (media.parent as? ViewGroup)?.removeView(media)
             media.applyPalette(palette)
-            timerLabel = null; diagnosticsLabel = null
+            timerLabel = null; diagnosticsLabel = null; napLabel = null; nearbyBudgetLabel = null
+            napPlanLabel = null; napStartButton = null
             window.statusBarColor = paper
             window.navigationBarColor = palette.surface
             // The same drawable survives UI rebuilds so its motion never restarts on tab/theme changes.
@@ -487,6 +526,8 @@ class MainActivity : Activity() {
         tab == 1 -> tx("영상", "Videos")
         tab == 2 -> tx("설정", "Settings")
         tab == 3 -> tx("활동", "Activities")
+        tab == 4 -> tx("주변", "Nearby")
+        tab == 5 -> tx("낮잠", "Nap")
         else -> tx("대시보드", "Dashboard")
     }
 
@@ -502,16 +543,18 @@ class MainActivity : Activity() {
         addView(iconButton(tx("설정", "Settings"), AppIcon.SETTINGS) { navigateTo(2) }, LinearLayout.LayoutParams(dp(56), dp(56)))
     }
 
-    private fun buildNavigation() = ResponsiveCardGrid(this, minCardWidthDp = 1, maxCardWidthDp = 720, maxColumns = 1, gapDp = 0, centerContent = true).apply {
+    private fun buildNavigation() = ResponsiveCardGrid(this, minCardWidthDp = 1, maxCardWidthDp = 1000, maxColumns = 1, gapDp = 0, centerContent = true).apply {
         setPadding(dp(16), dp(6), dp(16), dp(8))
         addView(row().apply {
             listOf(Triple(0, tx("대시보드", "Dashboard"), AppIcon.DASHBOARD),
                 Triple(1, tx("영상", "Videos"), AppIcon.PLAY),
-                Triple(3, tx("활동", "Activities"), AppIcon.LEAF)).forEach { (destination, title, glyph) ->
+                Triple(3, tx("활동", "Activities"), AppIcon.LEAF),
+                Triple(4, tx("주변", "Nearby"), AppIcon.MAP),
+                Triple(5, tx("낮잠", "Nap"), AppIcon.BED)).forEach { (destination, title, glyph) ->
                 addView(button(title, tab == destination) { navigateTo(destination) }.apply {
-                    textSize = 20f
+                    textSize = 18f
                     setPadding(dp(10), dp(8), dp(10), dp(8))
-                    if (resources.configuration.screenWidthDp < 600) {
+                    if (resources.configuration.screenWidthDp < 1100) {
                         setCompoundDrawablesRelativeWithIntrinsicBounds(null, IconDrawable(glyph,
                             if (tab == destination) palette.onAccent else ink, dp(24)), null, null)
                     } else withIcon(glyph, if (tab == destination) palette.onAccent else ink)
@@ -625,6 +668,7 @@ class MainActivity : Activity() {
         setPadding(dp(if (panelOnRight) 16 else 28), dp(24), dp(if (panelOnRight) 28 else 16), dp(28))
         when {
             tab == 2 -> buildSettings(this)
+            tab == 5 && safeToConfigure() -> buildNap(this)
             !allowed() -> buildBlockedState(addReadingColumn(this))
             recovery != null -> {
                 addView(label(tx("이어 할 활동이 있어요", "Resume your activity"), 30f, true))
@@ -635,6 +679,8 @@ class MainActivity : Activity() {
             completed != null -> buildFeedback(addReadingColumn(this), completed!!)
             tab == 1 -> buildMedia(this)
             tab == 3 -> buildActivities(this)
+            tab == 4 -> buildNearby(this)
+            tab == 5 -> buildNap(this)
             else -> buildRecommendations(this)
         }
     }
@@ -712,6 +758,7 @@ class MainActivity : Activity() {
 
     private fun goBack(): Boolean {
         transientDialog?.takeIf { it.isShowing }?.let { it.dismiss(); return true }
+        if (nap != null) { endNap(false, tx("휴식을 마쳤어요", "Rest ended")); render(); return true }
         if (active != null || recovery != null || completed != null) {
             leaveActivityScreen()
             pendingScrollRestore = (leftScroll?.scrollY ?: 0) to activityReturnScroll
@@ -726,6 +773,8 @@ class MainActivity : Activity() {
 
     private fun navigateTo(destination: Int, remember: Boolean = true) {
         if (tab == destination) return
+        if (nap != null) endNap(false, tx("다른 화면으로 이동해 휴식을 마쳤어요", "Rest ended when you changed screens"))
+        napChime.stop()
         screenScrolls[tab] = (leftScroll?.scrollY ?: 0) to (contentScroll?.scrollY ?: 0)
         if (remember) {
             screenHistory.addLast(tab)
@@ -734,9 +783,11 @@ class MainActivity : Activity() {
         media.pauseForHost()
         leaveActivityScreen()
         pendingVideoEntry = UsageEntryPoint.MANUAL
+        napEntry = UsageEntryPoint.MANUAL; nearbyEntry = UsageEntryPoint.MANUAL
         tab = destination
         pendingScrollRestore = screenScrolls[destination] ?: (0 to 0)
         render()
+        if (destination == 5 && !demoMode) comfort.refresh()
     }
 
     private fun maybeShowEnergyIntroduction() {
@@ -765,6 +816,9 @@ class MainActivity : Activity() {
         UsageCategory.REFLECTION -> tx("생각 정리", "Reflection")
         UsageCategory.QUIZ -> tx("퀴즈", "Quiz")
         UsageCategory.EXTERNAL_MEDIA -> tx("외부 미디어", "External media")
+        UsageCategory.FOOD -> tx("주변 먹거리", "Nearby food")
+        UsageCategory.WALK -> tx("산책", "Walk")
+        UsageCategory.NAP -> tx("낮잠", "Nap")
     }
     private fun ownTitle(activity: OwnActivity): String = if (resources.configuration.locales[0].language != "en") activity.title else when (activity.id) {
         "rest_3" -> "3-minute eye break"; "reflection_5" -> "5-minute reflection"; "quiz_8" -> "8-minute quiz"
@@ -816,7 +870,9 @@ class MainActivity : Activity() {
             val available = (ActivityCatalog.all + ActivityCatalog.guided).filter { it.durationSeconds + 120 <= budget }
                 .sortedByDescending { feedback[it.id]?.preference ?: .5 }
             val videos = VideoCatalog.recommend(budget)
-            val categories = (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) + available.map { category(it.kind) }.distinct()
+            val categories = (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) + available.map { category(it.kind) }.distinct() +
+                (if (budget >= 420) listOf(UsageCategory.NAP) else emptyList()) +
+                (if (budget >= 1200) listOf(UsageCategory.FOOD, UsageCategory.WALK) else emptyList())
             val ranked = if (learningOn) UsagePreferences.rank(usageRecords, chargeEstimate().seconds, snapshot?.stateOfCharge, categories) else categories
             ranked.take(3).forEach { kind ->
                 val count = UsagePreferences.matchingChoices(usageRecords, kind, chargeEstimate().seconds)
@@ -830,6 +886,14 @@ class MainActivity : Activity() {
                             navigateTo(1); pendingVideoEntry = UsageEntryPoint.RECOMMENDED
                             if (!media.selectVideo(sample.id)) pendingVideoEntry = UsageEntryPoint.MANUAL
                         }
+                    })
+                } else if (kind == UsageCategory.NAP) {
+                    cards.addView(choiceCard(tx("잠깐 낮잠", "A short nap"), tx("충전 여유에 맞춰 기상 · $reason", "Wake within your charging window · $reason"), AppIcon.BED) {
+                        navigateTo(5); napEntry = UsageEntryPoint.RECOMMENDED
+                    })
+                } else if (kind == UsageCategory.FOOD || kind == UsageCategory.WALK) {
+                    cards.addView(choiceCard(categoryTitle(kind), tx("지도에서 왕복시간부터 확인해 보세요", "Check both walking times on the map first"), if (kind == UsageCategory.WALK) AppIcon.LEAF else AppIcon.COFFEE) {
+                        navigateTo(4); nearbyEntry = UsageEntryPoint.RECOMMENDED
                     })
                 } else {
                     val activity = available.first { category(it.kind) == kind }
@@ -859,6 +923,275 @@ class MainActivity : Activity() {
         parent.addView(media)
         addCardGrid(parent).addView(choiceCard("Netflix", tx("외부 앱 또는 웹으로 열어요. 로그인·멤버십·기기 지원이 필요하며, 외부 재생은 이 앱에서 제어할 수 없어요.",
             "Opens an external app or browser. Login, membership and device support are required; playback is outside this app's control."), AppIcon.PLAY) { openNetflix() })
+    }
+
+    private fun buildNearby(parent: LinearLayout) {
+        parent.addView(label(tx("차 밖의 작은 여유", "A little time outside"), 32f, true))
+        parent.addView(label(tx("지도에서 장소와 도보 경로를 확인하고, 돌아올 시간을 남겨두세요.", "Check places and walking routes on a map, with time left to return."), 21f))
+        val setup = addCardGrid(parent, 300, 450, 2)
+        val search = surfaceCard()
+        search.addView(sectionTitle(tx("어디에서 찾을까요?", "Where to explore?"), AppIcon.MAP))
+        search.addView(button(if (nearbyArea.isBlank()) tx("지역·충전소 이름 입력", "Enter an area or charging station") else nearbyArea) { editNearbyArea() })
+        search.addView(button(tx("차량 위치 한 번 가져오기", "Get vehicle location once"), enabled = !demoMode) { requestVehicleLocation() })
+        search.addView(label(if (demoMode) tx("시연 모드에서는 지역명을 입력하세요.", "Enter an area name in demo mode.") else nearbyNote.ifBlank {
+            tx("위치는 검색·QR을 선택할 때만 지도에 전달해요.", "Location is shared with the map only when you choose a search or QR.") }, 18f).apply { setTextColor(muted) })
+        search.addView(button(if (nearbyProvider == MapProvider.KAKAO) "Kakao Map ▾" else "NAVER Map ▾") {
+            chooseSetting(tx("지도 선택", "Map provider"), listOf("Kakao Map", "NAVER Map"), nearbyProvider.ordinal) {
+                nearbyProvider = MapProvider.entries[it]; routeConfirmed = false; render(preserveScroll = true)
+            }
+        })
+        search.addView(button(tx("차량 위치를 휴대폰으로", "Vehicle pin for your phone"), enabled = nearbyFix?.isFresh() == true) {
+            if (allowed()) {
+                val link = nearbyFix?.let(NearbyMapLinks::vehicleLink)
+                if (link != null) showMapHandoff(link, tx("충전 차량 위치", "Charging vehicle"))
+                else toast(tx("차량 위치를 다시 가져와 주세요", "Refresh the vehicle location first"))
+            }
+        })
+        setup.addView(search)
+        val plan = surfaceCard()
+        plan.addView(sectionTitle(tx("돌아올 시간까지 계산", "Plan your return"), AppIcon.CLOCK))
+        plan.addView(button(tx("가는 길 $outboundMinutes · 오는 길 $returnMinutes · 체류 ${stayMinutes}분", "Out $outboundMinutes · Back $returnMinutes · Stay $stayMinutes min")) { editWalkingPlan() })
+        plan.addView(button(if (routeConfirmed) tx("도보 경로 시간 확인됨 ✓", "Walking times checked ✓") else tx("지도에서 왕복시간 확인했어요", "I checked both walking times"), routeConfirmed) {
+            if (allowed()) { routeConfirmed = !routeConfirmed; updateNearbyBudget(); render(preserveScroll = true) }
+        })
+        nearbyBudgetLabel = label("", 22f, true).also { plan.addView(it) }
+        plan.addView(label(tx("복귀 여유 5분 포함 · 예상시간은 달라질 수 있어요. 휴대폰 알람은 직접 설정해 주세요.",
+            "Includes a 5-minute return buffer. Estimates can change. Set a return alarm on your phone."), 18f).apply { setTextColor(muted) })
+        setup.addView(plan)
+        val cards = addCardGrid(parent)
+        listOf(Triple(NearbyKind.CAFE, tx("커피 한 잔", "Coffee"), AppIcon.COFFEE),
+            Triple(NearbyKind.FOOD, tx("가까운 식사", "A nearby meal"), AppIcon.COFFEE),
+            Triple(NearbyKind.CONVENIENCE, tx("가벼운 간식", "A quick snack"), AppIcon.COFFEE),
+            Triple(NearbyKind.PARK, tx("공원 산책", "A park walk"), AppIcon.LEAF)).forEach { (kind, title, glyph) ->
+            cards.addView(choiceCard(title, tx("지도에서 영업시간·보행 경로 확인", "Check opening hours and walking routes on the map"), glyph) { openNearby(kind, title) })
+        }
+        updateNearbyBudget()
+    }
+
+    private fun editNearbyArea() {
+        if (!allowed()) return
+        val field = android.widget.EditText(this).apply {
+            setText(nearbyArea); hint = tx("예: 판교역 또는 충전소 이름", "Area or charging station name")
+            setSingleLine(); filters = arrayOf(android.text.InputFilter.LengthFilter(80))
+        }
+        transientDialog = AlertDialog.Builder(this, dialogTheme()).setTitle(tx("검색할 지역", "Search area")).setView(field)
+            .setPositiveButton(tx("적용", "Apply")) { _, _ -> if (allowed()) { nearbyArea = field.text.toString().trim(); routeConfirmed = false; render(preserveScroll = true) } }
+            .setNegativeButton(tx("취소", "Cancel"), null).show()
+    }
+
+    private fun requestVehicleLocation() {
+        if (!allowed() || demoMode) return
+        if (!locationReader.hasPermission()) { requestPermissions(arrayOf(VehicleLocationReader.PERMISSION), 701); return }
+        nearbyNote = tx("차량 위치를 확인하고 있어요…", "Checking vehicle location…"); render(preserveScroll = true)
+        locationReader.requestOnce { result ->
+            if (!started || !resumed || !allowed() || demoMode) return@requestOnce
+            nearbyFix = result.fix; routeConfirmed = false
+            nearbyNote = if (result.fix != null) tx("차량 위치 확인 · 지역명을 비우면 카카오 검색에 사용해요.", "Vehicle location available. Clear the area name to use it with Kakao.")
+                else tx("차량 위치를 가져오지 못했어요. 지역명으로 검색할 수 있어요.", "Vehicle location unavailable. Search using an area name.")
+            render(preserveScroll = true)
+        }
+    }
+
+    private fun openNearby(kind: NearbyKind, title: String) {
+        if (!allowed()) return
+        val uri = NearbyMapLinks.searchLink(nearbyProvider, nearbyArea, kind, if (demoMode) null else nearbyFix)
+        if (uri == null) {
+            nearbyNote = tx("검색할 지역명을 입력하세요. 네이버 검색에는 지역명이 필요해요.", "Enter an area name. Naver search requires an area.")
+            render(preserveScroll = true); editNearbyArea(); return
+        }
+        routeConfirmed = false
+        recordChoice(if (kind == NearbyKind.PARK) UsageCategory.WALK else UsageCategory.FOOD, nearbyEntry)
+        nearbyEntry = UsageEntryPoint.MANUAL
+        updateNearbyBudget()
+        showMapHandoff(uri, title)
+    }
+
+    private fun showMapHandoff(uri: Uri, title: String) {
+        if (!allowed()) return
+        val content = column().apply { setPadding(dp(24), dp(12), dp(24), dp(12)) }
+        val bitmap = runCatching {
+            val size = 640
+            val bits = com.google.zxing.qrcode.QRCodeWriter().encode(uri.toString(), com.google.zxing.BarcodeFormat.QR_CODE, size, size,
+                mapOf(com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8", com.google.zxing.EncodeHintType.MARGIN to 4))
+            android.graphics.Bitmap.createBitmap(IntArray(size * size) { index -> if (bits[index % size, index / size]) android.graphics.Color.BLACK else android.graphics.Color.WHITE },
+                size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+        if (bitmap != null) content.addView(ImageView(this).apply { setImageBitmap(bitmap); contentDescription = tx("휴대폰 지도 연결 QR", "QR to open the map on your phone") },
+            LinearLayout.LayoutParams(dp(280), dp(280)).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        content.addView(label(if (uri.scheme == "nmap") tx("휴대폰 카메라로 스캔하세요. 네이버 지도 앱이 필요해요.", "Scan with your phone. The Naver Map app is required.")
+            else tx("휴대폰 카메라로 스캔해 지도를 여세요.", "Scan with your phone to open the map."), 20f))
+        content.addView(label(tx("장소·경로 확인용이며 복귀 알람은 전달되지 않아요.", "This shares a map link, not a return alarm."), 18f))
+        val dialog = AlertDialog.Builder(this, dialogTheme()).setTitle(title).setView(content)
+            .setPositiveButton(tx("차량에서 열기", "Open on this device"), null).setNegativeButton(tx("닫기", "Close"), null).create()
+        transientDialog = dialog; dialog.show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (!allowed()) { dialog.dismiss(); return@setOnClickListener }
+            if (NearbyMapLauncher(this) { allowed() }.open(uri)) dialog.dismiss()
+            else toast(tx("연결할 지도 앱이 없어요. 휴대폰 QR을 사용해 주세요.", "No compatible map app. Use the phone QR."))
+        }
+    }
+
+    private fun editWalkingPlan() {
+        if (!allowed()) return
+        val content = column().apply { setPadding(dp(24), dp(8), dp(24), 0) }
+        fun field(title: String, initial: Int): android.widget.EditText {
+            content.addView(label(title, 20f))
+            return android.widget.EditText(this).apply { setText(initial.toString()); inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                filters = arrayOf(android.text.InputFilter.LengthFilter(3)); content.addView(this) }
+        }
+        val out = field(tx("가는 도보시간 (분)", "Outbound walk (min)"), outboundMinutes)
+        val back = field(tx("오는 도보시간 (분)", "Return walk (min)"), returnMinutes)
+        val stay = field(tx("머무는 시간 (분)", "Time at the place (min)"), stayMinutes)
+        val dialog = AlertDialog.Builder(this, dialogTheme()).setTitle(tx("지도에서 확인한 시간", "Times checked on the map")).setView(content)
+            .setPositiveButton(tx("적용", "Apply"), null).setNegativeButton(tx("취소", "Cancel"), null).create()
+        transientDialog = dialog; dialog.show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (!allowed()) { dialog.dismiss(); return@setOnClickListener }
+            val a = out.text.toString().toIntOrNull(); val b = back.text.toString().toIntOrNull(); val c = stay.text.toString().toIntOrNull()
+            if (a == null || b == null || c == null || a !in 1..180 || b !in 1..180 || c !in 0..180) {
+                toast(tx("이동은 1~180분, 체류는 0~180분으로 입력하세요.", "Walking: 1–180 min. Stay: 0–180 min.")); return@setOnClickListener
+            }
+            outboundMinutes = a; returnMinutes = b; stayMinutes = c; routeConfirmed = false
+            dialog.dismiss(); render(preserveScroll = true)
+        }
+    }
+
+    private fun updateNearbyBudget() {
+        val result = NearbyTimeBudget.assess(recommendationSeconds(), outboundMinutes * 60, returnMinutes * 60, stayMinutes * 60, routeConfirmed)
+        val total = (result.requiredSeconds ?: 0) / 60
+        nearbyBudgetLabel?.text = when (result.status) {
+            NearbyBudgetStatus.FITS -> tx("총 ${total}분 · 현재 예상 범위에 들어와요", "Total $total min · fits the current estimate")
+            NearbyBudgetStatus.NOT_ENOUGH_TIME -> tx("총 ${total}분 · 지금은 시간이 부족해요", "Total $total min · not enough time now")
+            NearbyBudgetStatus.UNKNOWN_WINDOW -> tx("남은 충전시간을 확인해야 계산할 수 있어요", "A remaining-time estimate is needed")
+            NearbyBudgetStatus.UNCONFIRMED_ROUTE -> tx("총 ${total}분 입력됨 · 지도에서 왕복시간을 확인하세요", "Entered $total min · verify both walking times on the map")
+            NearbyBudgetStatus.INVALID_PLAN -> tx("이동·체류 시간을 다시 입력하세요", "Check the walking and stay times")
+        }
+    }
+
+    private fun buildNap(parent: LinearLayout) {
+        parent.addView(label(tx("잠깐 쉬어도 괜찮아요", "Time to recharge yourself"), 32f, true))
+        val cards = addCardGrid(parent, 300, 450, 2)
+        val rest = surfaceCard()
+        rest.addView(sectionTitle(tx("나의 낮잠", "Your nap"), AppIcon.BED))
+        val current = nap
+        if (current != null) {
+            napLabel = label(clock(napRemainingSeconds), 64f, true).also { rest.addView(it) }
+            rest.addView(label(tx("화면 밝기를 낮췄어요. 충전 여유가 줄면 먼저 깨워드려요.", "The screen is dimmed. A shorter charge window brings the wake cue forward."), 22f))
+            rest.addView(button(tx("일어났어요 · 휴식 마치기", "I'm awake · end rest"), true) { endNap(false, tx("휴식을 마쳤어요", "Rest ended")); render(preserveScroll = true) })
+        } else {
+            rest.addView(button(tx("휴식 ${napDurationMinutes}분 ▾", "$napDurationMinutes-minute rest ▾")) {
+                chooseSetting(tx("휴식 길이", "Rest duration"), listOf("5 min", "10 min", "15 min", "20 min"), listOf(5, 10, 15, 20).indexOf(napDurationMinutes)) {
+                    napDurationMinutes = listOf(5, 10, 15, 20)[it]; render(preserveScroll = true)
+                }
+            })
+            napPlanLabel = label("", 22f).also { rest.addView(it) }
+            rest.addView(button(tx("기상음 미리 듣기", "Preview wake sound")) { if (allowed() && !napChime.play(true)) toast(tx("기상음을 재생하지 못했어요. 알람 볼륨을 확인하세요.", "Could not play the wake cue. Check alarm volume.")) })
+            napStartButton = button(tx("낮잠 시작", "Start nap"), true) { startNap() }.also { rest.addView(it) }
+        }
+        rest.addView(label(tx("이 화면이 열려 있는 동안 기상음을 울려요. 화면을 벗어나면 휴식과 알림이 종료돼요.", "The wake cue works while this screen stays open. Leaving ends the rest and cue."), 18f).apply { setTextColor(muted) })
+        if (napNote.isNotBlank()) rest.addView(label(napNote, 22f, true))
+        rest.addView(button(tx("기상음 끄기", "Silence wake sound")) { napChime.stop() })
+        cards.addView(rest)
+        val climate = surfaceCard()
+        climate.addView(sectionTitle(tx("편안한 실내", "Cabin comfort"), AppIcon.SUN))
+        val state = comfort.state
+        climate.addView(label(if (demoMode) tx("시연 모드 · 실제 차량을 제어하지 않아요", "Demo mode · no vehicle controls") else comfortStatusText(), 20f))
+        state.currentCelsius?.let { climate.addView(label(tx("${state.zoneLabel.orEmpty()} · 현재 설정 ${it}°C", "${state.zoneLabel.orEmpty()} · set to ${it}°C"), 23f, true)) }
+        if (state.supportedCelsius.isNotEmpty()) {
+            if (selectedTemperature !in state.supportedCelsius) selectedTemperature = state.supportedCelsius.minBy { abs(it - 22f) }
+            climate.addView(button(tx("원하는 온도 ${selectedTemperature}°C ▾", "Preferred temperature ${selectedTemperature}°C ▾"), enabled = !demoMode && nap == null) {
+                chooseSetting(tx("원하는 온도", "Preferred temperature"), state.supportedCelsius.map { "$it°C" }, state.supportedCelsius.indexOf(selectedTemperature)) {
+                    selectedTemperature = state.supportedCelsius[it]; render(preserveScroll = true)
+                }
+            })
+        }
+        climate.addView(button(tx("선택한 온도 적용", "Apply temperature"), enabled = !demoMode && state.canSet && !state.busy && nap == null) { comfort.setTemperature(selectedTemperature) })
+        climate.addView(button(tx("변경 전 온도로 복원", "Restore previous temperature"), enabled = !demoMode && state.canRestore && !state.busy && nap == null) { comfort.restoreTemperature() })
+        climate.addView(button(tx("차량 지원 상태 확인", "Check vehicle support"), enabled = !demoMode && !state.busy && nap == null) {
+            if (safeToConfigure()) {
+                if (checkSelfPermission("android.car.permission.CAR_SPEED") != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf("android.car.permission.CAR_SPEED"), 702)
+                else comfort.refresh()
+            }
+        })
+        climate.addView(label(tx("주차 P·정지 상태에서 지원되는 공조 구역에 적용해요. 공조 전원은 차량에서 켜 주세요. 종료 시 온도는 자동 복원하지 않아요.",
+            "Applies to the supported climate zone only while parked in P. Switch climate power on in the vehicle. Ending rest does not restore temperature automatically."), 18f).apply { setTextColor(muted) })
+        climate.addView(sectionTitle(tx("편안한 자세", "Get comfortable"), AppIcon.BED))
+        climate.addView(label(tx("시트는 차량 버튼으로 편안한 자세에 맞춰 주세요. 시트 자동 조절은 지원하지 않아요.",
+            "Adjust the seat with the vehicle controls. Automatic seat adjustment is unavailable."), 20f))
+        cards.addView(climate)
+        updateNapPlan()
+    }
+
+    private fun comfortStatusText(): String = tx(when (comfort.state.status) {
+        com.binteum.app.vehicle.ComfortStatus.READY -> "지원 상태를 확인했어요"
+        com.binteum.app.vehicle.ComfortStatus.APPLIED -> "차량의 변경된 온도를 확인했어요"
+        com.binteum.app.vehicle.ComfortStatus.RESTORED -> "변경 전 온도로 복원됐어요"
+        com.binteum.app.vehicle.ComfortStatus.PERMISSION_REQUIRED -> "차량 지원 상태 확인을 눌러 권한을 허용해 주세요"
+        com.binteum.app.vehicle.ComfortStatus.PARK_REQUIRED -> "주차 P·속도 0 확인이 필요해요"
+        com.binteum.app.vehicle.ComfortStatus.CHANGED_ELSEWHERE -> "차량에서 온도가 바뀌었어요. 이전 값으로 덮어쓰지 않아요"
+        com.binteum.app.vehicle.ComfortStatus.UNCONFIRMED -> "변경 결과를 확인하지 못했어요. 차량 화면을 확인하세요"
+        com.binteum.app.vehicle.ComfortStatus.CONNECTING, com.binteum.app.vehicle.ComfortStatus.CHECKING -> "차량 지원 상태를 확인하고 있어요"
+        else -> "온도 제어가 아직 준비되지 않았어요"
+    }, when (comfort.state.status) {
+        com.binteum.app.vehicle.ComfortStatus.READY -> "Climate controls available"
+        com.binteum.app.vehicle.ComfortStatus.APPLIED -> "Changed temperature verified"
+        com.binteum.app.vehicle.ComfortStatus.RESTORED -> "Previous temperature restored"
+        com.binteum.app.vehicle.ComfortStatus.PERMISSION_REQUIRED -> "Use Check vehicle support to grant permission"
+        com.binteum.app.vehicle.ComfortStatus.PARK_REQUIRED -> "Park P and zero speed must be verified"
+        com.binteum.app.vehicle.ComfortStatus.CHANGED_ELSEWHERE -> "Temperature changed elsewhere; not overwritten"
+        com.binteum.app.vehicle.ComfortStatus.UNCONFIRMED -> "Change unconfirmed; check the vehicle display"
+        com.binteum.app.vehicle.ComfortStatus.CONNECTING, com.binteum.app.vehicle.ComfortStatus.CHECKING -> "Checking vehicle support"
+        else -> "Climate controls are not ready"
+    })
+
+    private fun startNap() {
+        if (!allowed() || nap != null || comfort.state.busy) return
+        val next = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime()) ?: return
+        media.pauseForHost(); completionVoice.stop(); napChime.stop()
+        napChoiceId = recordChoice(UsageCategory.NAP, napEntry); napEntry = UsageEntryPoint.MANUAL
+        nap = next; napRemainingSeconds = next.plannedDurationSeconds; napNote = ""
+        beforeNapBrightness = window.attributes.screenBrightness
+        window.attributes = window.attributes.apply { screenBrightness = .12f }
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        render(preserveScroll = true)
+    }
+
+    private fun tickNap() {
+        updateNapPlan()
+        val current = nap ?: return
+        val progress = current.tick(SystemClock.elapsedRealtime(), if (allowed()) recommendationSeconds() else null)
+        napRemainingSeconds = progress.remainingSeconds
+        napLabel?.text = clock(progress.remainingSeconds)
+        if (progress.finished) {
+            val completedNormally = progress.finishReason == NapFinishReason.REQUESTED_DURATION_COMPLETE || progress.finishReason == NapFinishReason.CHARGE_WINDOW_ENDING
+            endNap(completedNormally, if (completedNormally) tx("일어날 시간이에요. 차량 상태를 확인해 주세요.", "Time to wake up. Check your vehicle.")
+                else tx("충전·차량 상태를 확인할 수 없어 휴식을 마쳤어요.", "Rest ended because charging or vehicle status is unavailable."), progress.elapsedSeconds)
+            if (progress.shouldWake && !napChime.play()) napNote += tx(" 기상음 재생 불가 · 알람 볼륨을 확인하세요.", " Wake sound unavailable; check alarm volume.")
+            render(preserveScroll = true)
+        }
+    }
+
+    private fun endNap(finished: Boolean, note: String, elapsed: Int? = null) {
+        val current = nap ?: return
+        val duration = elapsed ?: current.cancel(SystemClock.elapsedRealtime()).elapsedSeconds
+        napChoiceId?.let { id -> usageRecords.firstOrNull { it.id == id }?.let { event ->
+            val updated = event.copy(durationSeconds = duration, completed = finished)
+            usageStore.save(updated); usageRecords = UsagePreferences.record(usageRecords, updated, 4000)
+        } }
+        nap = null; napChoiceId = null; napNote = note
+        window.attributes = window.attributes.apply { screenBrightness = beforeNapBrightness }
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun toast(text: String) = android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
+
+    private fun updateNapPlan() {
+        if (nap != null) return
+        val planned = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime())
+        napPlanLabel?.text = if (planned == null) tx("남은 여유가 2분을 넘어야 해요. 충전 예상시간이나 출발 시각을 확인해 주세요.",
+            "More than 2 minutes are needed. Check the charge estimate or departure time.")
+            else tx("지금은 최대 ${(planned.plannedDurationSeconds + 59) / 60}분 휴식 · 기상 여유 2분", "Up to ${(planned.plannedDurationSeconds + 59) / 60} min now · 2-minute wake buffer")
+        napStartButton?.isEnabled = planned != null && allowed() && !comfort.state.busy
     }
 
     private fun recordChoice(kind: UsageCategory, entry: UsageEntryPoint, id: String = UUID.randomUUID().toString()): String {
@@ -1246,6 +1579,8 @@ class MainActivity : Activity() {
 
     private fun switchSource() {
         if (!BuildConfig.DEBUG) return
+        if (nap != null) endNap(false, tx("데이터 모드가 바뀌어 휴식을 마쳤어요", "Rest ended after changing the data mode"))
+        nearbyFix = null; routeConfirmed = false; locationReader.cancel()
         media.pauseForHost(); interruptActivity(getString(com.binteum.app.R.string.ui_text_117))
         recovery = null; completed = null; source.stop()
         demoMode = !demoMode; prefs.edit().putBoolean("demoMode", demoMode).apply()
@@ -1274,6 +1609,11 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 701) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && allowed()) requestVehicleLocation()
+            else { nearbyNote = tx("위치 권한이 없어 지역명 검색을 사용해요", "Use an area name without location permission"); render(preserveScroll = true) }
+        }
+        if (requestCode == 702 && !demoMode) comfort.refresh()
         if (requestCode == 700 && !demoMode) {
             source.stop()
             snapshot = null; status = SessionStatus.WAITING_FOR_DATA
