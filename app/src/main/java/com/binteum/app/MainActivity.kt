@@ -49,6 +49,8 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("tab", tab)
+        outState.putIntArray("screenHistory", screenHistory.toIntArray())
+        outState.putInt("activityReturnScroll", activityReturnScroll)
         super.onSaveInstanceState(outState)
     }
 
@@ -113,6 +115,10 @@ class MainActivity : Activity() {
     private var demoMode = false
     private var demoScenario = 0
     private var tab = 0
+    private val screenHistory = ArrayDeque<Int>()
+    private val screenScrolls = mutableMapOf<Int, Pair<Int, Int>>()
+    private var pendingScrollRestore: Pair<Int, Int>? = null
+    private var activityReturnScroll = 0
     private var developerOptionsExpanded = false
     private var moreActivitiesExpanded = false
     private val expandedSettings = mutableSetOf<String>()
@@ -178,6 +184,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tab = savedInstanceState?.getInt("tab", 0) ?: 0
+        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..3 }?.takeLast(16)?.forEach(screenHistory::addLast)
+        activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
         themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
         backgroundMode = runCatching {
@@ -260,7 +268,7 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        if (tab != 0) navigateTo(0) else super.onBackPressed()
+        if (!goBack()) super.onBackPressed()
     }
 
     override fun onDestroy() { completionVoice.stop(); ambientBackground.release(); media.release(); usageStore.close(); super.onDestroy() }
@@ -366,8 +374,10 @@ class MainActivity : Activity() {
         handler.removeCallbacks(connectionRefresh)
         animateConnectionRefresh = false
         connectionCard = null
-        val previousLeftScroll = if (preserveScroll) leftScroll?.scrollY ?: 0 else 0
-        val previousContentScroll = if (preserveScroll) contentScroll?.scrollY ?: 0 else 0
+        val scrollRestore = pendingScrollRestore
+        pendingScrollRestore = null
+        val previousLeftScroll = scrollRestore?.first ?: if (preserveScroll) leftScroll?.scrollY ?: 0 else 0
+        val previousContentScroll = scrollRestore?.second ?: if (preserveScroll) contentScroll?.scrollY ?: 0 else 0
         lastWindowContentKey = windowContentKey()
         val preserveMedia = tab == 1 && allowed() && active == null && recovery == null && completed == null
         if (preserveMedia) media.beginHostReparent()
@@ -383,6 +393,7 @@ class MainActivity : Activity() {
                 background = ambientBackground
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isForceDarkAllowed = false
             }
+            root.addView(buildTopBar(), LinearLayout.LayoutParams(-1, -2))
             val wide = resources.configuration.screenWidthDp >= 1100
             val body = if (wide) row() else column()
             val left = buildLeft(!wide)
@@ -414,7 +425,7 @@ class MainActivity : Activity() {
             ambientBackground.callback = root
             ambientBackground.setActive(resumed && safeToConfigure())
             updateSystemBars()
-            if (preserveScroll) {
+            if (preserveScroll || scrollRestore != null) {
                 val nextLeftScroll = leftScroll
                 val nextContentScroll = contentScroll
                 root.post {
@@ -431,17 +442,18 @@ class MainActivity : Activity() {
     }
 
     private fun performPanelAction() {
-        if (tab == 2) navigateTo(0) else movePanel(!panelOnRight)
+        if (tab == 2) goBack() else movePanel(!panelOnRight)
     }
 
     private fun buildPanelActionButton(): Button {
         val confirming = tab == 2
-        val title = if (confirming) getString(R.string.settings_apply) else if (panelOnRight) "←" else "→"
+        val title = if (confirming) getString(R.string.settings_apply) else if (panelOnRight)
+            tx("패널을 왼쪽으로", "Move panel left") else tx("패널을 오른쪽으로", "Move panel right")
         return button(title, selected = confirming) { performPanelAction() }.apply {
             contentDescription = if (confirming) getString(R.string.settings_confirm)
                 else getString(if (panelOnRight) R.string.panel_move_left else R.string.panel_move_right)
             tooltipText = contentDescription
-            textSize = if (confirming) 24f else 32f
+            textSize = if (confirming) 22f else 18f
         }
     }
 
@@ -468,25 +480,50 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun buildNavigation() = row().apply {
-        setPadding(dp(16), dp(8), dp(16), dp(8))
-        listOf(Triple(0, tx("대시보드", "Dashboard"), AppIcon.DASHBOARD),
-            Triple(1, tx("영상", "Videos"), AppIcon.PLAY),
-            Triple(3, tx("활동", "Activities"), AppIcon.LEAF)).forEach { (destination, title, glyph) ->
-            addView(button(title, tab == destination) { navigateTo(destination) }.apply {
-                withIcon(glyph, if (tab == destination) palette.onAccent else ink)
-            }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), 0, dp(4), 0) })
-        }
+    private fun screenTitle(): String = when {
+        active != null -> tx("활동 중", "Activity")
+        recovery != null -> tx("활동 이어하기", "Resume activity")
+        completed != null -> tx("활동 마무리", "Finish activity")
+        tab == 1 -> tx("영상", "Videos")
+        tab == 2 -> tx("설정", "Settings")
+        tab == 3 -> tx("활동", "Activities")
+        else -> tx("대시보드", "Dashboard")
+    }
+
+    private fun buildTopBar() = row().apply {
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(16), dp(4), dp(16), dp(4))
+        val canGoBack = tab != 0 || screenHistory.isNotEmpty() || active != null || recovery != null || completed != null
+        addView(button(tx("뒤로", "Back"), enabled = canGoBack) { goBack() }.apply {
+            withIcon(AppIcon.BACK); textSize = 20f
+            contentDescription = tx("이전 화면으로", "Go back")
+        }, LinearLayout.LayoutParams(-2, dp(56)))
+        addView(label(screenTitle(), 25f, true).apply { setPadding(dp(20), 0, dp(12), 0) }, LinearLayout.LayoutParams(0, -2, 1f))
+        addView(iconButton(tx("설정", "Settings"), AppIcon.SETTINGS) { navigateTo(2) }, LinearLayout.LayoutParams(dp(56), dp(56)))
+    }
+
+    private fun buildNavigation() = ResponsiveCardGrid(this, minCardWidthDp = 1, maxCardWidthDp = 720, maxColumns = 1, gapDp = 0, centerContent = true).apply {
+        setPadding(dp(16), dp(6), dp(16), dp(8))
+        addView(row().apply {
+            listOf(Triple(0, tx("대시보드", "Dashboard"), AppIcon.DASHBOARD),
+                Triple(1, tx("영상", "Videos"), AppIcon.PLAY),
+                Triple(3, tx("활동", "Activities"), AppIcon.LEAF)).forEach { (destination, title, glyph) ->
+                addView(button(title, tab == destination) { navigateTo(destination) }.apply {
+                    textSize = 20f
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                    if (resources.configuration.screenWidthDp < 600) {
+                        setCompoundDrawablesRelativeWithIntrinsicBounds(null, IconDrawable(glyph,
+                            if (tab == destination) palette.onAccent else ink, dp(24)), null, null)
+                    } else withIcon(glyph, if (tab == destination) palette.onAccent else ink)
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), 0, dp(4), 0) })
+            }
+        })
     }
 
     private fun buildLeft(compact: Boolean): LinearLayout = column().apply {
         setPadding(dp(20), dp(20), dp(20), dp(24))
         background = rounded(palette.surface, 32, palette.border)
-        val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
-        heading.addView(iconButton(tx("설정", "Settings"), AppIcon.SETTINGS) { navigateTo(2) }, LinearLayout.LayoutParams(dp(60), dp(60)))
-        heading.addView(label(tx("빈틈의실", "Binteum"), 24f, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, -2, 1f))
-        heading.addView(View(this@MainActivity), LinearLayout.LayoutParams(dp(60), 1))
-        addView(heading)
+        addView(label(tx("빈틈의실", "Binteum"), 24f, true).apply { gravity = Gravity.CENTER })
         if (demoMode) addView(badge(tx("시연 · 모의 충전", "Demo · simulated charging"), palette.warningSurface, palette.warning))
         val gauge = FrameLayout(this@MainActivity)
         chargeGauge = ChargeGaugeView(this@MainActivity).also { gauge.addView(it, FrameLayout.LayoutParams(-1, -1)) }
@@ -588,14 +625,14 @@ class MainActivity : Activity() {
         setPadding(dp(if (panelOnRight) 16 else 28), dp(24), dp(if (panelOnRight) 28 else 16), dp(28))
         when {
             tab == 2 -> buildSettings(this)
-            !allowed() -> buildBlockedState(this)
+            !allowed() -> buildBlockedState(addReadingColumn(this))
             recovery != null -> {
                 addView(label(tx("이어 할 활동이 있어요", "Resume your activity"), 30f, true))
                 addView(button(tx("이어서 하기", "Resume"), true) { resumeActivity() })
                 addView(button(tx("마치기", "End activity")) { recovery?.let { finishChoice(it, false) }; recovery = null; saveCheckpoint(); render() })
             }
-            active != null -> buildActive(this, active!!)
-            completed != null -> buildFeedback(this, completed!!)
+            active != null -> buildActive(addReadingColumn(this), active!!)
+            completed != null -> buildFeedback(addReadingColumn(this), completed!!)
             tab == 1 -> buildMedia(this)
             tab == 3 -> buildActivities(this)
             else -> buildRecommendations(this)
@@ -664,13 +701,41 @@ class MainActivity : Activity() {
         parent.addView(label(getString(com.binteum.app.R.string.ui_text_042), 23f))
     }
 
-    private fun navigateTo(destination: Int) {
+    /** Completing an activity and leaving a completed screen are different events. */
+    private fun leaveActivityScreen() {
+        active?.let { finishChoice(it, false) }
+        recovery?.takeIf { it.attemptId != active?.attemptId }?.let { finishChoice(it, false) }
+        active = null; recovery = null; completed = null
+        message = ""
+        saveCheckpoint()
+    }
+
+    private fun goBack(): Boolean {
+        transientDialog?.takeIf { it.isShowing }?.let { it.dismiss(); return true }
+        if (active != null || recovery != null || completed != null) {
+            leaveActivityScreen()
+            pendingScrollRestore = (leftScroll?.scrollY ?: 0) to activityReturnScroll
+            render()
+            return true
+        }
+        if (tab == 1 && media.closeOpenContent()) return true
+        val destination = if (screenHistory.isNotEmpty()) screenHistory.removeLast() else if (tab != 0) 0 else return false
+        navigateTo(destination, remember = false)
+        return true
+    }
+
+    private fun navigateTo(destination: Int, remember: Boolean = true) {
         if (tab == destination) return
+        screenScrolls[tab] = (leftScroll?.scrollY ?: 0) to (contentScroll?.scrollY ?: 0)
+        if (remember) {
+            screenHistory.addLast(tab)
+            while (screenHistory.size > 16) screenHistory.removeFirst()
+        }
         media.pauseForHost()
-        if (active != null) interruptActivity(getString(com.binteum.app.R.string.ui_text_043))
-        recovery?.let { finishChoice(it, false) }; recovery = null; completed = null
+        leaveActivityScreen()
         pendingVideoEntry = UsageEntryPoint.MANUAL
         tab = destination
+        pendingScrollRestore = screenScrolls[destination] ?: (0 to 0)
         render()
     }
 
@@ -712,9 +777,27 @@ class MainActivity : Activity() {
         else tx("마무리 2분을 남기고 할 수 있어요", "Fits with a 2-minute finish buffer")
     }
     private fun choiceCard(title: String, detail: String, glyph: AppIcon, action: () -> Unit) = surfaceCard().apply {
-        addView(sectionTitle(title, glyph))
-        addView(label(detail, 22f).apply { setTextColor(muted) })
-        addView(button(tx("열기", "Open"), true) { action() }.apply { withIcon(AppIcon.ARROW_RIGHT, palette.onAccent) })
+        setPadding(dp(20), dp(20), dp(20), dp(20))
+        minimumHeight = dp(210)
+        addView(icon(glyph, palette.text, 30).apply {
+            background = rounded(palette.surfaceAlt, 16)
+        }, LinearLayout.LayoutParams(dp(52), dp(52)))
+        addView(space(10))
+        addView(label(title, 25f, true))
+        addView(label(detail, 20f).apply { setTextColor(muted) })
+        addView(label(tx("열기  →", "Open  →"), 20f, true).apply { setPadding(0, dp(14), 0, 0) })
+        isClickable = true; isFocusable = true
+        contentDescription = "$title. $detail. ${tx("열기", "Open") }"
+        descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        foreground = RippleDrawable(ColorStateList.valueOf(0x26FFFFFF), null, rounded(android.graphics.Color.WHITE, 26))
+        setOnClickListener { action() }
+    }
+    private fun addCardGrid(parent: LinearLayout, minWidth: Int = 280, maxWidth: Int = 380, columns: Int = 3): ResponsiveCardGrid =
+        ResponsiveCardGrid(this, minWidth, maxWidth, columns).also {
+            parent.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12); bottomMargin = dp(12) })
+        }
+    private fun addReadingColumn(parent: LinearLayout, width: Int = 720): LinearLayout = column().also { content ->
+        addCardGrid(parent, 280, width, 1).addView(content)
     }
     private fun buildRecommendations(parent: LinearLayout) {
         parent.addView(label(tx("충전하는 동안, 나에게 맞게", "Make this charge time yours"), 32f, true))
@@ -722,8 +805,9 @@ class MainActivity : Activity() {
         val budget = recommendationSeconds()
         parent.addView(label(sourceTitle(window.source), 21f).apply { setTextColor(muted) })
         parent.addView(label(tx("현재 ${snapshot?.stateOfCharge ?: "—"}% → 목표 $target%", "Now ${snapshot?.stateOfCharge ?: "—"}% → goal $target%"), 24f, true))
+        val cards = addCardGrid(parent)
         if (budget == null || budget <= 120) {
-            parent.addView(choiceCard(if (budget == null) tx("시간을 확인하고 있어요", "Waiting for a time estimate") else tx("곧 마무리할 시간이에요", "Time to wrap up"),
+            cards.addView(choiceCard(if (budget == null) tx("시간을 확인하고 있어요", "Waiting for a time estimate") else tx("곧 마무리할 시간이에요", "Time to wrap up"),
                 if (budget == null) tx("충전량 변화가 쌓이면 예상시간을 계산해요. 아래 탭에서 원하는 활동을 바로 열 수 있어요.",
                     "An estimate appears after enough charging data. Open any activity from the tabs below.")
                 else tx("긴 활동 추천은 쉬어갈게요. 영상과 활동은 아래 탭에서 직접 선택할 수 있어요.", "Long activities are not recommended now. You can still choose from the tabs."), AppIcon.CLOCK) { navigateTo(3) })
@@ -740,7 +824,7 @@ class MainActivity : Activity() {
                     else tx("충전량과 남은 시간에 맞는 활동", "Fits your charge level and remaining time")
                 if (kind == UsageCategory.VIDEO) {
                     val sample = videos.first()
-                    parent.addView(choiceCard(tx("짧은 영상 · ${sample.seconds / 60}분", "Short video · ${sample.seconds / 60} min"),
+                    cards.addView(choiceCard(tx("짧은 영상 · ${sample.seconds / 60}분", "Short video · ${sample.seconds / 60} min"),
                         "${sample.title} · $reason", AppIcon.PLAY) {
                         if (allowed() && recommendationSeconds()?.let { sample.seconds + 120 <= it } == true) {
                             navigateTo(1); pendingVideoEntry = UsageEntryPoint.RECOMMENDED
@@ -749,7 +833,7 @@ class MainActivity : Activity() {
                     })
                 } else {
                     val activity = available.first { category(it.kind) == kind }
-                    parent.addView(choiceCard(ownTitle(activity), reason, activityIcon(activity.kind)) {
+                    cards.addView(choiceCard(ownTitle(activity), reason, activityIcon(activity.kind)) {
                         startActivity(activity, UsageEntryPoint.RECOMMENDED)
                     })
                 }
@@ -762,8 +846,9 @@ class MainActivity : Activity() {
 
     private fun buildActivities(parent: LinearLayout) {
         parent.addView(label(tx("원하는 활동을 골라보세요", "Choose any activity"), 32f, true))
+        val cards = addCardGrid(parent)
         (ActivityCatalog.all + ActivityCatalog.guided).forEach { activity ->
-            parent.addView(choiceCard(ownTitle(activity), fitDescription(activity.durationSeconds), activityIcon(activity.kind)) {
+            cards.addView(choiceCard(ownTitle(activity), fitDescription(activity.durationSeconds), activityIcon(activity.kind)) {
                 startActivity(activity, UsageEntryPoint.MANUAL)
             })
         }
@@ -772,7 +857,7 @@ class MainActivity : Activity() {
     private fun buildMedia(parent: LinearLayout) {
         parent.addView(label(tx("보고 싶은 영상을 직접 선택", "Choose a video"), 32f, true))
         parent.addView(media)
-        parent.addView(choiceCard("Netflix", tx("외부 앱 또는 웹으로 열어요. 로그인·멤버십·기기 지원이 필요하며, 외부 재생은 이 앱에서 제어할 수 없어요.",
+        addCardGrid(parent).addView(choiceCard("Netflix", tx("외부 앱 또는 웹으로 열어요. 로그인·멤버십·기기 지원이 필요하며, 외부 재생은 이 앱에서 제어할 수 없어요.",
             "Opens an external app or browser. Login, membership and device support are required; playback is outside this app's control."), AppIcon.PLAY) { openNetflix() })
     }
 
@@ -824,6 +909,7 @@ class MainActivity : Activity() {
             render(preserveScroll = true); return
         }
         media.pauseForHost()
+        activityReturnScroll = contentScroll?.scrollY ?: 0
         val attempt = recordChoice(category(activity.kind), entry)
         active = Run(activity.id, attempt, SystemClock.elapsedRealtime(), System.currentTimeMillis(), bucket())
         completed = null; recovery = null; quizIndex = 0; quizAnswer = null
@@ -885,7 +971,7 @@ class MainActivity : Activity() {
 
     private fun buildSettings(parent: LinearLayout) {
         parent.addView(label(getString(com.binteum.app.R.string.ui_text_014), 34f, true))
-        parent.addView(space(12))
+        val cards = addCardGrid(parent, 380, 520, 2)
         val display = surfaceCard()
         display.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_077), AppIcon.SYSTEM))
         val themeNames = listOf(getString(com.binteum.app.R.string.ui_text_078), getString(com.binteum.app.R.string.ui_text_079), getString(com.binteum.app.R.string.ui_text_080))
@@ -914,8 +1000,8 @@ class MainActivity : Activity() {
                 if (it != languageIndex) changeReadingPreference("language", language = if (it == 1) "en" else "ko")
             }
         })
-        parent.addView(display)
-        buildHistorySettings(parent)
+        cards.addView(display)
+        buildHistorySettings(cards)
         val voice = surfaceCard()
         voice.addView(sectionTitle(tx("음성 미리 듣기 · 실험 기능", "Voice preview · experimental"), AppIcon.INFO))
         voice.addView(label(tx("Pleos 음성 서비스의 기기 지원을 확인하는 기능이에요. 충전 완료 알림은 아직 연결하지 않았어요.",
@@ -928,7 +1014,7 @@ class MainActivity : Activity() {
             if (prefs.getBoolean("completionVoice", true) && safeToConfigure()) { media.pauseForHost(); announceCompletion() }
             else android.widget.Toast.makeText(this, R.string.voice_test_blocked, android.widget.Toast.LENGTH_LONG).show()
         })
-        parent.addView(voice)
+        cards.addView(voice)
         val background = surfaceCard()
         background.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_087), AppIcon.SUN))
         background.addView(settingRow(getString(com.binteum.app.R.string.ui_text_088), getString(com.binteum.app.R.string.ui_text_089), backgroundTitle(backgroundMode)) {
@@ -946,14 +1032,14 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean("backgroundMotion", it).apply()
             ambientBackground.configure(backgroundMode, palette.dark, backgroundMotion)
         })
-        parent.addView(background)
+        cards.addView(background)
         val connection = surfaceCard()
         connectionCard = connection
         populateConnectionSettings(connection)
-        parent.addView(connection)
+        cards.addView(connection)
     }
 
-    private fun buildHistorySettings(parent: LinearLayout) {
+    private fun buildHistorySettings(parent: ViewGroup) {
         val history = surfaceCard()
         history.addView(sectionTitle(tx("선택 기록과 추천", "Choice history and recommendations"), AppIcon.SPARKLES))
         history.addView(label(tx("활동을 선택할 때마다 남은 충전시간·예측 출처·충전량·목표·직접/추천 선택을 이 기기에 저장해요. 자체 활동은 마침·중단도 기록해요.",

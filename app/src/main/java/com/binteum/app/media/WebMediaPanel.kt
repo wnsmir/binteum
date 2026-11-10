@@ -35,6 +35,7 @@ import com.binteum.app.ui.AppPalette
 import com.binteum.app.ui.AppTheme
 import com.binteum.app.ui.IconDrawable
 import com.binteum.app.ui.ThemeMode
+import com.binteum.app.ui.ResponsiveCardGrid
 import com.binteum.core.VideoCatalog
 import com.binteum.core.VideoSample
 import com.binteum.core.MediaSelectionQueue
@@ -63,7 +64,8 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private val frame = FrameLayout(context)
     private val launcherRow = LinearLayout(context)
     private val recommendationHeading = TextView(context)
-    private val videoChoices = LinearLayout(context).apply { orientation = VERTICAL }
+    private val videoChoices = ResponsiveCardGrid(context, minCardWidthDp = 280, maxCardWidthDp = 380, maxColumns = 3)
+    private val videoAdvice = TextView(context)
     private var candidates = VideoCatalog.all
     private var selectedVideo: VideoSample = VideoCatalog.all.first()
     private var recommendationKey = ""
@@ -102,6 +104,10 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         primaryText += recommendationHeading
         addView(recommendationHeading)
         addView(videoChoices, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        videoAdvice.textSize = 19f
+        videoAdvice.setPadding(0, dp(12), 0, dp(12))
+        secondaryText += videoAdvice
+        addView(videoAdvice, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         launcherRow.orientation = VERTICAL
         addView(launcherRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
@@ -110,7 +116,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         currentTitle.setPadding(0, dp(24), 0, dp(12))
         primaryText += currentTitle
         addView(currentTitle)
-        val actions = LinearLayout(context).apply { orientation = HORIZONTAL }
+        val actions = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.START }
         reopenButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_129), AppIcon.RESET, false) {
             when (selectedPage) {
                 Page.YOUTUBE -> selectVideo(selectedVideo.id)
@@ -120,8 +126,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
         launchButtons += reopenButton
         closeButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_053), AppIcon.CLOSE, false) {
-            destroySurface()
-            setStatus(context.getString(com.binteum.app.R.string.ui_text_131))
+            closeOpenContent()
         }
         actions.addView(reopenButton, actionLayout())
         actions.addView(closeButton, actionLayout())
@@ -212,14 +217,10 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             videoChoices.removeAllViews()
             videoCards.clear()
             candidates.forEach { sample -> videoChoices.addView(videoCard(sample)) }
-            videoChoices.addView(TextView(context).apply {
-                text = context.getString(when {
-                    remainingBudgetSeconds == null -> com.binteum.app.R.string.media_unknown_duration
-                    browseMode -> com.binteum.app.R.string.media_browse_duration
-                    else -> com.binteum.app.R.string.ui_text_137
-                })
-                textSize = 20f; setTextColor(palette.textMuted)
-                setPadding(0, dp(6), 0, dp(12))
+            videoAdvice.text = context.getString(when {
+                remainingBudgetSeconds == null -> com.binteum.app.R.string.media_unknown_duration
+                browseMode -> com.binteum.app.R.string.media_browse_duration
+                else -> com.binteum.app.R.string.ui_text_137
             })
             refreshPresentation()
         }
@@ -232,20 +233,36 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     /** Explicit dashboard/card choice. true means the choice was accepted, not that playback succeeded. */
     fun selectVideo(id: String): Boolean = VideoCatalog.all.firstOrNull { it.id == id }?.let(::playVideo) ?: false
 
+    /** Back closes the current player first; browsing remains available under the existing safety gate. */
+    fun closeOpenContent(): Boolean {
+        if (webView == null) return false
+        destroySurface()
+        setStatus(context.getString(com.binteum.app.R.string.ui_text_131))
+        return true
+    }
+
     private fun videoCard(sample: VideoSample): LinearLayout {
         val card = LinearLayout(context).apply {
-            orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(12), dp(20), dp(12))
+            orientation = VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(16))
             background = rounded(palette.surface, dp(22), palette.border)
-            layoutParams = LayoutParams(-1, -2).apply { bottomMargin = dp(12) }
             isClickable = true; isFocusable = true
+            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
             contentDescription = context.getString(com.binteum.app.R.string.video_card_description,
                 sample.title, sample.seconds / 60, sample.seconds % 60)
             foreground = android.graphics.drawable.RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null,
                 rounded(Color.WHITE, dp(22)))
             setOnClickListener { playVideo(sample) }
         }
-        val preview = FrameLayout(context).apply {
+        // The grid supplies the measured card width. The image follows that width,
+        // including a narrow split window, rather than using the full screen width.
+        val preview = object : FrameLayout(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val width = View.MeasureSpec.getSize(widthMeasureSpec)
+                super.onMeasure(widthMeasureSpec,
+                    View.MeasureSpec.makeMeasureSpec(width * 9 / 16, View.MeasureSpec.EXACTLY))
+            }
+        }.apply {
             background = rounded(0xFF15191F.toInt(), dp(14)); clipToOutline = true
         }
         val image = ImageView(context).apply {
@@ -261,31 +278,29 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             background = rounded(0xDD000000.toInt(), dp(6))
         }
         preview.addView(duration, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(dp(6), dp(6), dp(6), dp(6))
+            setMargins(dp(8), dp(8), dp(8), dp(8))
         })
-        // Compact enough for the content column in split-screen, while retaining a 16:9 preview.
-        val previewWidth = if (resources.configuration.screenWidthDp < 650) 140 else 224
-        card.addView(preview, LayoutParams(dp(previewWidth), dp(previewWidth * 9 / 16)))
-        val text = LinearLayout(context).apply {
-            orientation = VERTICAL; setPadding(dp(20), 0, 0, 0)
-            addView(TextView(context).apply {
-                this.text = sample.title; textSize = 25f; setTextColor(palette.text)
-                setTypeface(null, Typeface.BOLD)
+        card.addView(preview, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        card.addView(TextView(context).apply {
+            text = sample.title; textSize = 25f; setTextColor(palette.text)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(4), dp(14), dp(4), dp(4))
+            maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        card.addView(TextView(context).apply {
+            text = sample.author; textSize = 19f; setTextColor(palette.textMuted)
+            setPadding(dp(4), 0, dp(4), dp(10))
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        card.addView(TextView(context).apply {
+            text = context.getString(when (fitsBudget(sample)) {
+                true -> com.binteum.app.R.string.media_fits_duration
+                false -> com.binteum.app.R.string.media_exceeds_duration
+                null -> com.binteum.app.R.string.media_unknown_choice
             })
-            addView(TextView(context).apply {
-                this.text = sample.author; textSize = 20f; setTextColor(palette.textMuted)
-                setPadding(0, dp(8), 0, dp(8))
-            })
-            addView(TextView(context).apply {
-                this.text = context.getString(when (fitsBudget(sample)) {
-                    true -> com.binteum.app.R.string.media_fits_duration
-                    false -> com.binteum.app.R.string.media_exceeds_duration
-                    null -> com.binteum.app.R.string.media_unknown_choice
-                })
-                textSize = 20f; setTextColor(if (fitsBudget(sample) == false) palette.warning else palette.textMuted)
-            })
-        }
-        card.addView(text, LayoutParams(0, -2, 1f))
+            textSize = 19f; setTextColor(if (fitsBudget(sample) == false) palette.warning else palette.textMuted)
+            setPadding(dp(4), 0, dp(4), 0)
+        })
         videoCards[sample.id] = card
         loadThumbnail(sample.id, image)
         return card
@@ -387,15 +402,16 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun actionLayout() = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-        setMargins(dp(4), 0, dp(4), 0)
+    private fun actionLayout() = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+        setMargins(0, 0, dp(12), 0)
     }
 
     private fun actionButton(label: String, icon: AppIcon, primary: Boolean, action: () -> Unit): Button {
         val view = Button(context).apply {
             text = label
-            textSize = 24f
+            textSize = 22f
             isAllCaps = false
+            minWidth = dp(96)
             minHeight = dp(64)
             minimumHeight = dp(64)
             compoundDrawablePadding = dp(12)

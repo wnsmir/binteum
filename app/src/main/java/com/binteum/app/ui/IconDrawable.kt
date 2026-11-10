@@ -10,7 +10,7 @@ import android.graphics.drawable.Drawable
 
 enum class AppIcon {
     DASHBOARD, PLAY, SETTINGS, SUN, MOON, SYSTEM, BATTERY, CLOCK, LEAF, SPARKLES,
-    QUIZ, ARROW_RIGHT, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT,
+    QUIZ, ARROW_RIGHT, BACK, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT,
 }
 
 /** Original outline symbols on a shared 24-unit grid; no font or external asset. */
@@ -48,6 +48,7 @@ class IconDrawable(private val icon: AppIcon, color: Int, private val sizePx: In
                 canvas.drawRoundRect(3f, 14f, 10f, 21f, 1.6f, 1.6f, paint)
                 canvas.drawRoundRect(14f, 14f, 21f, 21f, 1.6f, 1.6f, paint)
             }
+            AppIcon.BACK -> { line(20f, 12f, 4f, 12f); line(4f, 12f, 11f, 5f); line(4f, 12f, 11f, 19f) }
             AppIcon.PLAY -> path { moveTo(8f, 4f); lineTo(20f, 12f); lineTo(8f, 20f); close() }
             AppIcon.SETTINGS -> {
                 // Eight teeth and a central hub, recognizable as a settings cog.

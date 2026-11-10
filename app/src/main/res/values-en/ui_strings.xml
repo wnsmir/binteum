@@ -27,7 +27,6 @@
     <string name="ui_text_040">"Checking"</string>
     <string name="ui_text_041">"Explore with simulated charging"</string>
     <string name="ui_text_042">"The app goal and the vehicle charging limit are shown separately."</string>
-    <string name="ui_text_043">"Activity stopped. Select another time."</string>
     <string name="ui_text_044">"Allow battery status access"</string>
     <string name="ui_text_045">"Binteum reads battery level and charging status to show content while parked.\n\nIt does not start or stop charging. The vehicle limit changes only when you explicitly choose Apply vehicle target. Allow read access on the next screen."</string>
     <string name="ui_text_046">"Continue"</string>

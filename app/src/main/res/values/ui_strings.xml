@@ -27,7 +27,6 @@
     <string name="ui_text_040">"확인 중"</string>
     <string name="ui_text_041">"개발용 모의 충전으로 둘러보기"</string>
     <string name="ui_text_042">"앱의 추천 목표와 차량의 충전 목표를 구분해 표시해요."</string>
-    <string name="ui_text_043">"활동을 중단했어요. 다른 시간을 골라 보세요."</string>
     <string name="ui_text_044">"배터리 상태 읽기를 허용해 주세요"</string>
     <string name="ui_text_045">"빈틈의실은 배터리 잔량과 실제 충전 상태를 확인해, 정차 중 할 수 있는 활동을 안내해요.\n\n충전을 시작하거나 종료하지 않아요. 차량 목표는 ‘차량 목표 적용’에서 직접 선택한 경우에만 변경해요. 다음 화면에서 읽기 권한을 허용해 주세요."</string>
     <string name="ui_text_046">"계속"</string>
