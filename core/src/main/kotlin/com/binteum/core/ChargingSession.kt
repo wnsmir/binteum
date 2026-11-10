@@ -10,6 +10,12 @@ data class VehicleSnapshot(
     val uxRestricted: Boolean?,
     val vehicleAwake: Boolean,
     val observedAtMillis: Long,
+    /** OEM estimate in seconds at [chargeTimeObservedAtMillis], never a user timer. */
+    val chargeTimeRemainingSeconds: Int? = null,
+    /** Vehicle's current charge limit; an app-selected goal does not change this setting. */
+    val vehicleTargetPercent: Int? = null,
+    /** Original continuous-property sample time, not the time a cached value was republished. */
+    val chargeTimeObservedAtMillis: Long? = null,
 )
 
 enum class SessionStatus {

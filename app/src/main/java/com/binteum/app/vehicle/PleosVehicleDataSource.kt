@@ -15,9 +15,11 @@ import android.os.Looper
 import android.os.PowerManager
 import com.binteum.core.VehicleDataSource
 import com.binteum.core.VehicleSnapshot
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * Read-only Pleos Vehicle 2.3.2 integration. The owner starts/stops it with the visible UI.
+ * Pleos Vehicle 2.3.2 integration. The owner starts/stops it with the visible UI.
  *
  * Pleos SOC and charge-switch callbacks do not contain a vehicle measurement timestamp. SOC
  * uses its request START time, never the time of re-emitting a cached snapshot. The AAOS charge
@@ -27,7 +29,8 @@ import com.binteum.core.VehicleSnapshot
  * charging setting, so only AAOS EV_CHARGE_STATE determines VehicleSnapshot.charging.
  *
  * vehicleAwake means this foreground client's device is interactive. It is not an ignition
- * signal or a promise of monitoring while the driver is away. No vehicle control APIs are used.
+ * signal or a promise of monitoring while the driver is away. The only write is an explicitly
+ * requested charge-percent limit; charging start/stop and current are never controlled.
  */
 class PleosVehicleDataSource(context: Context) : VehicleDataSource {
     private val localizedContext = context.applicationContext.createConfigurationContext(context.resources.configuration)
@@ -64,12 +67,134 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
     private var pollingHalted = false
     private var stateOfCharge: Int? = null
     private var charging: Boolean? = null
+    private var chargeTimeRemainingSeconds: Int? = null
+    private var vehicleTargetPercent: Int? = null
+    private var chargeTimeObservedAtMillis: Long? = null
     private var uxRestricted: Boolean? = null
     private var observedAtMillis = 0L
     private var batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_01)
     private var switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
     private var uxStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_03)
     private var chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_04)
+    private var chargeDetailsStatus = "AAOS charge estimate unavailable"
+    private var cachedChargeTargets: List<Int>? = null
+    private var targetCapabilityPending = false
+    private var targetWritePending = false
+    private var targetWriteEpoch = 0L
+    private var etaNotBeforeMillis = 0L
+
+    private fun safeToSetChargeTarget(): Boolean = active && !pollingHalted && vehicle != null && battery != null &&
+        uxReader?.isConnected == true && powerManager?.isInteractive == true && uxRestricted == false && charging != null &&
+        stateOfCharge?.let { it in 0..100 } == true &&
+        System.currentTimeMillis() - observedAtMillis in 0L..30_000L &&
+        context.checkSelfPermission(PleosPermission.CAR_ENERGY) == PackageManager.PERMISSION_GRANTED &&
+        context.checkSelfPermission(PleosPermission.CONTROL_CAR_ENERGY) == PackageManager.PERMISSION_GRANTED &&
+        context.checkSelfPermission("android.car.permission.CAR_ENERGY") == PackageManager.PERMISSION_GRANTED
+
+    private fun supportedWholePercents(values: List<Float>): List<Int> = values.mapNotNull { raw ->
+        if (!raw.isFinite() || raw !in 1f..100f) null
+        else raw.roundToInt().takeIf { abs(raw - it) < .001f }
+    }.distinct().sorted()
+
+    /** Empty means unavailable here, including missing permission or unconfirmed parked state. */
+    fun supportedChargeTargets(onComplete: (List<Int>) -> Unit) = onMain {
+        uxReader?.refresh()
+        if (!safeToSetChargeTarget()) { onComplete(emptyList()); return@onMain }
+        cachedChargeTargets?.let { onComplete(it); return@onMain }
+        if (targetCapabilityPending) { onComplete(emptyList()); return@onMain }
+        val api = battery ?: run { onComplete(emptyList()); return@onMain }
+        val session = generation
+        targetCapabilityPending = true
+        var done = false
+        val timeout = Runnable {
+            if (active && generation == session && !done) {
+                done = true; targetCapabilityPending = false; onComplete(emptyList())
+            }
+        }
+        fun finish(values: List<Int>) = onMain {
+            if (!active || generation != session || done) return@onMain
+            done = true; targetCapabilityPending = false; handler.removeCallbacks(timeout)
+            val result = values.takeIf { battery === api && safeToSetChargeTarget() }.orEmpty()
+            if (result.isNotEmpty()) cachedChargeTargets = result
+            onComplete(result)
+        }
+        handler.postDelayed(timeout, READ_TIMEOUT_MS)
+        try {
+            api.checkEvChargePercentLimitCapabilities(
+                { config, values -> finish(if (config.accessType == AccessType.READ_WRITE) supportedWholePercents(values) else emptyList()) },
+                { finish(emptyList()) },
+            )
+        } catch (_: Exception) { finish(emptyList()) }
+    }
+
+    /**
+     * Explicit UI action only. true means a separate read confirmed the requested target.
+     * false includes timeout/unconfirmed application; callers must not claim the old value remains.
+     * No automatic retries and no charging switch/current control.
+     */
+    fun setChargeTarget(percent: Int, onComplete: (Boolean) -> Unit) = onMain {
+        uxReader?.refresh()
+        if (percent !in 1..100 || !safeToSetChargeTarget() || targetWritePending) {
+            onComplete(false); return@onMain
+        }
+        val api = battery ?: run { onComplete(false); return@onMain }
+        val reader = uxReader ?: run { onComplete(false); return@onMain }
+        val session = generation
+        val screenAtRequest = screenEpoch
+        targetWritePending = true
+        var done = false
+        fun stillValid() = active && generation == session && battery === api && uxReader === reader &&
+            screenEpoch == screenAtRequest && safeToSetChargeTarget()
+        val timeout = Runnable {
+            if (active && generation == session && !done) {
+                done = true; targetWritePending = false; onComplete(false)
+            }
+        }
+        fun finish(success: Boolean) = onMain {
+            if (!active || generation != session || done) return@onMain
+            done = true; targetWritePending = false; handler.removeCallbacks(timeout)
+            onComplete(success && stillValid())
+        }
+        handler.postDelayed(timeout, TARGET_WRITE_TIMEOUT_MS)
+        try {
+            // Always recheck capability for a write; cached options are for presentation only.
+            api.checkEvChargePercentLimitCapabilities({ config, values -> onMain {
+                if (done) return@onMain
+                val supported = supportedWholePercents(values)
+                if (!stillValid() || config.accessType != AccessType.READ_WRITE || percent !in supported) {
+                    finish(false); return@onMain
+                }
+                cachedChargeTargets = supported
+                try {
+                    api.setEvChargePercentLimit(percent.toFloat(), { _ -> onMain {
+                        if (done) return@onMain
+                        if (!stillValid()) { finish(false); return@onMain }
+                        try {
+                            reader.readChargeTarget { actual ->
+                                if (done || !stillValid()) { finish(false); return@readChargeTarget }
+                                if (actual == percent) {
+                                    targetWriteEpoch += 1
+                                    etaNotBeforeMillis = System.currentTimeMillis()
+                                    vehicleTargetPercent = actual
+                                    // The previous ETA was measured against the previous target.
+                                    chargeTimeRemainingSeconds = null; chargeTimeObservedAtMillis = null
+                                    publish()
+                                }
+                                finish(actual == percent)
+                            }
+                        } catch (_: Exception) { finish(false) }
+                    } }, { finish(false) })
+                } catch (_: Exception) { finish(false) }
+            } }, { finish(false) })
+        } catch (_: Exception) { finish(false) }
+    }
+
+    private fun clearChargeDetails() {
+        chargeTimeRemainingSeconds = null
+        vehicleTargetPercent = null
+        chargeTimeObservedAtMillis = null
+        chargeDetailsStatus = "AAOS charge estimate unavailable"
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -80,6 +205,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
             charging = null
             chargeSwitchEnabled = null
             chargeStateChangedAtMillis = null
+            clearChargeDetails()
             observedAtMillis = 0L
             publish()
         }
@@ -186,6 +312,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         if (powerManager?.isInteractive != true) {
             stateOfCharge = null
             charging = null
+            clearChargeDetails()
             observedAtMillis = 0L
             publish()
             handler.postDelayed({ poll(session) }, POLL_INTERVAL_MS)
@@ -195,6 +322,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         val request = ++cycle
         val screenAtRequest = screenEpoch
         val startedAt = System.currentTimeMillis()
+        readOptionalChargeDetails(session, request, screenAtRequest)
         var pending = (if (socReadable) 1 else 0) + (if (chargeReadable) 1 else 0) + 1
         var soc: Int? = null
         var switch: Boolean? = null
@@ -212,6 +340,7 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
                 charging = null
                 chargeSwitchEnabled = null
                 chargeStateChangedAtMillis = null
+                clearChargeDetails()
                 observedAtMillis = 0L
                 batteryStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_12)
                 switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
@@ -289,11 +418,49 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         }
     }
 
+    private fun readOptionalChargeDetails(session: Long, request: Long, screenAtRequest: Long) {
+        val reader = uxReader ?: run { clearChargeDetails(); return }
+        val targetEpochAtRequest = targetWriteEpoch
+        var finished = false
+        val timeout = Runnable {
+            if (active && generation == session && cycle == request && !finished && targetWriteEpoch == targetEpochAtRequest) {
+                finished = true
+                clearChargeDetails()
+                publish()
+            }
+        }
+        handler.postDelayed(timeout, READ_TIMEOUT_MS)
+        try {
+            reader.readChargeDetails { result ->
+                if (!active || generation != session || cycle != request || finished || targetWriteEpoch != targetEpochAtRequest) return@readChargeDetails
+                finished = true
+                handler.removeCallbacks(timeout)
+                if (powerManager?.isInteractive == true && screenEpoch == screenAtRequest) {
+                    chargeTimeRemainingSeconds = result.remainingSeconds.takeIf {
+                        result.sampledAtMillis != null && result.sampledAtMillis >= etaNotBeforeMillis
+                    }
+                    vehicleTargetPercent = result.targetPercent
+                    chargeTimeObservedAtMillis = result.sampledAtMillis.takeIf { chargeTimeRemainingSeconds != null }
+                    chargeDetailsStatus = result.status
+                } else clearChargeDetails()
+                publish()
+            }
+        } catch (_: Exception) {
+            finished = true
+            handler.removeCallbacks(timeout)
+            clearChargeDetails()
+        }
+    }
+
     private fun publish() {
         if (!active) return
-        diagnostics = "$batteryStatus / $switchStatus / $chargeStatus / $uxStatus"
+        diagnostics = "$batteryStatus / $switchStatus / $chargeStatus / $chargeDetailsStatus / $uxStatus"
+        val estimateFresh = chargeTimeObservedAtMillis?.let { System.currentTimeMillis() - it in 0L..30_000L } == true
+        val chargingWithEstimate = charging == true && estimateFresh && powerManager?.isInteractive == true
         listener?.invoke(VehicleSnapshot(stateOfCharge, charging, uxRestricted,
-            powerManager?.isInteractive == true, observedAtMillis))
+            powerManager?.isInteractive == true, observedAtMillis,
+            chargeTimeRemainingSeconds.takeIf { chargingWithEstimate }, vehicleTargetPercent,
+            chargeTimeObservedAtMillis.takeIf { chargingWithEstimate }))
     }
 
     override fun stop() = onMain { stopOnMain() }
@@ -314,10 +481,16 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         socReadable = false
         chargeReadable = false
         pollingHalted = false
+        cachedChargeTargets = null
+        targetCapabilityPending = false
+        targetWritePending = false
+        targetWriteEpoch += 1
+        etaNotBeforeMillis = 0L
         stateOfCharge = null
         charging = null
         chargeSwitchEnabled = null
         chargeStateChangedAtMillis = null
+        clearChargeDetails()
         switchStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_02)
         chargeStatus = localizedContext.getString(com.binteum.app.R.string.diagnostic_04)
         uxRestricted = null
@@ -333,5 +506,6 @@ class PleosVehicleDataSource(context: Context) : VehicleDataSource {
         const val POLL_INTERVAL_MS = 3_000L
         const val READ_TIMEOUT_MS = 3_000L
         const val CAPABILITY_TIMEOUT_MS = 20_000L
+        const val TARGET_WRITE_TIMEOUT_MS = 8_000L
     }
 }

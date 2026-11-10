@@ -37,16 +37,19 @@ import com.binteum.app.ui.IconDrawable
 import com.binteum.app.ui.ThemeMode
 import com.binteum.core.VideoCatalog
 import com.binteum.core.VideoSample
+import com.binteum.core.MediaSelectionQueue
 
 /**
  * An inline, parked-only web surface. The host owns fresh vehicle/UX state.
- * The selected recommendation is preloaded after explicit reminder confirmation; only card/player taps request playback. No Android JS interface
+ * Only explicit choices load a player; a recommendation never starts playback. No Android JS interface
  * or vehicle information is exposed to the page. A hidden/blocked surface is
  * destroyed, not merely covered or left playing in the background.
  */
 class WebMediaPanel(context: Context) : LinearLayout(context) {
-    /** Host rechecks current safety and the explicitly started reminder before content loads or plays. */
+    /** Host rechecks fresh charging and vehicle safety before content loads or plays. */
     var onContentOpen: (() -> Boolean)? = null
+    /** App-level category choice only; never reports a video ID or provider playback history. */
+    var onVideoSelected: (() -> Unit)? = null
     private enum class Page(val asset: String) {
         YOUTUBE("media/youtube.html"), REST("media/rest.html")
     }
@@ -64,7 +67,8 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private var candidates = VideoCatalog.all
     private var selectedVideo: VideoSample = VideoCatalog.all.first()
     private var recommendationKey = ""
-    private var preloadAttempted = false
+    private var browseMode = false
+    private var remainingBudgetSeconds: Int? = null
     private val launchButtons = mutableListOf<Button>()
     private val launchers = mutableListOf<Launcher>()
     private val primaryText = mutableListOf<TextView>()
@@ -83,7 +87,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
     private var pollingGeneration = -1
     private var lastWebState = ""
     private var hostReparentDepth = 0
-    private var playWhenReady = false
+    private val videoSelection = MediaSelectionQueue()
     private val thumbnailExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val thumbnails = mutableMapOf<String, android.graphics.Bitmap>()
     private val thumbnailWaiters = mutableMapOf<String, MutableList<ImageView>>()
@@ -108,7 +112,11 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         addView(currentTitle)
         val actions = LinearLayout(context).apply { orientation = HORIZONTAL }
         reopenButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_129), AppIcon.RESET, false) {
-            selectedPage?.let(::open) ?: setStatus(context.getString(com.binteum.app.R.string.ui_text_130))
+            when (selectedPage) {
+                Page.YOUTUBE -> selectVideo(selectedVideo.id)
+                Page.REST -> open(Page.REST)
+                null -> setStatus(context.getString(com.binteum.app.R.string.ui_text_130))
+            }
         }
         launchButtons += reopenButton
         closeButton = actionButton(context.getString(com.binteum.app.R.string.ui_text_053), AppIcon.CLOSE, false) {
@@ -179,30 +187,50 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             setStatus(reason)
         } else if (!wasAllowed) {
             recommendationKey = ""
-            preloadAttempted = false
             setStatus(context.getString(com.binteum.app.R.string.ui_text_134))
         }
-        maybePreload()
+    }
+
+    /** Browsing is independent from recommendations; duration is advice, safety remains mandatory. */
+    fun setBrowseMode(enabled: Boolean) {
+        if (browseMode == enabled) return
+        browseMode = enabled
+        recommendationKey = ""
+        updateRecommendations(remainingBudgetSeconds)
     }
 
     fun updateRecommendations(remainingSeconds: Int?) {
-        candidates = VideoCatalog.recommend(remainingSeconds)
-        recommendationHeading.text = if (remainingSeconds == null) context.getString(com.binteum.app.R.string.ui_text_135)
+        remainingBudgetSeconds = remainingSeconds?.coerceAtLeast(0)
+        candidates = if (browseMode) VideoCatalog.all else VideoCatalog.recommend(remainingBudgetSeconds)
+        recommendationHeading.text = if (browseMode) context.getString(com.binteum.app.R.string.media_browse_heading, candidates.size)
+            else if (remainingBudgetSeconds == null) context.getString(com.binteum.app.R.string.media_unknown_heading)
             else context.getString(com.binteum.app.R.string.video_recommendation_heading,
-                remainingSeconds.coerceAtLeast(0) / 60, remainingSeconds.coerceAtLeast(0) % 60, candidates.size)
-        val key = "${remainingSeconds == null}/" + candidates.joinToString { it.id }
+                remainingBudgetSeconds!! / 60, remainingBudgetSeconds!! % 60, candidates.size)
+        val key = "$browseMode/${remainingBudgetSeconds == null}/" + candidates.joinToString { "${it.id}:${fitsBudget(it)}" }
         if (key != recommendationKey) {
             recommendationKey = key
             videoChoices.removeAllViews()
             videoCards.clear()
             candidates.forEach { sample -> videoChoices.addView(videoCard(sample)) }
             videoChoices.addView(TextView(context).apply {
-                text = if (remainingSeconds == null) context.getString(com.binteum.app.R.string.ui_text_136) else context.getString(com.binteum.app.R.string.ui_text_137); textSize = 20f; setTextColor(palette.textMuted)
+                text = context.getString(when {
+                    remainingBudgetSeconds == null -> com.binteum.app.R.string.media_unknown_duration
+                    browseMode -> com.binteum.app.R.string.media_browse_duration
+                    else -> com.binteum.app.R.string.ui_text_137
+                })
+                textSize = 20f; setTextColor(palette.textMuted)
                 setPadding(0, dp(6), 0, dp(12))
             })
+            refreshPresentation()
         }
-        maybePreload()
     }
+
+    private fun fitsBudget(sample: VideoSample): Boolean? = remainingBudgetSeconds?.let {
+        sample.seconds.toLong() + 120 <= it.toLong()
+    }
+
+    /** Explicit dashboard/card choice. true means the choice was accepted, not that playback succeeded. */
+    fun selectVideo(id: String): Boolean = VideoCatalog.all.firstOrNull { it.id == id }?.let(::playVideo) ?: false
 
     private fun videoCard(sample: VideoSample): LinearLayout {
         val card = LinearLayout(context).apply {
@@ -249,7 +277,12 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
                 setPadding(0, dp(8), 0, dp(8))
             })
             addView(TextView(context).apply {
-                this.text = context.getString(com.binteum.app.R.string.ui_text_138); textSize = 20f; setTextColor(palette.textMuted)
+                this.text = context.getString(when (fitsBudget(sample)) {
+                    true -> com.binteum.app.R.string.media_fits_duration
+                    false -> com.binteum.app.R.string.media_exceeds_duration
+                    null -> com.binteum.app.R.string.media_unknown_choice
+                })
+                textSize = 20f; setTextColor(if (fitsBudget(sample) == false) palette.warning else palette.textMuted)
             })
         }
         card.addView(text, LayoutParams(0, -2, 1f))
@@ -283,29 +316,31 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun playVideo(sample: VideoSample) {
-        if (!playbackAllowed || released || candidates.none { it.id == sample.id } || onContentOpen?.invoke() == false) return
+    private fun playVideo(sample: VideoSample): Boolean {
+        if (!playbackAllowed || released || (!browseMode && candidates.none { it.id == sample.id }) || onContentOpen?.invoke() == false) return false
         selectedVideo = sample
         val existing = webView
         if (existing != null && selectedPage == Page.YOUTUBE) {
-            // An explicit card tap authorizes this play request. Preloading never calls this path.
+            // Retain the last explicit tap even when the document is still loading.
+            videoSelection.select(sample.id)
             existing.settings.mediaPlaybackRequiresUserGesture = false
-            existing.evaluateJavascript("window.binteumPlayVideo && window.binteumPlayVideo(${JSONObject.quote(sample.id)});", null)
+            dispatchPendingVideo(existing, generation)
             refreshPresentation()
         } else open(Page.YOUTUBE, play = true)
+        onVideoSelected?.invoke()
         setStatus(context.getString(com.binteum.app.R.string.ui_text_139))
         post { if (playbackAllowed && frame.isAttachedToWindow) frame.requestRectangleOnScreen(android.graphics.Rect(0, 0, frame.width, frame.height), false) }
+        return true
     }
 
-    private fun maybePreload() {
-        if (!playbackAllowed || released || preloadAttempted || webView != null || candidates.isEmpty() || !isAttachedToWindow) return
-        preloadAttempted = true
-        val expectedGeneration = generation
-        handler.post {
-            if (playbackAllowed && !released && webView == null && isAttachedToWindow && generation == expectedGeneration && candidates.isNotEmpty()) {
-                selectedVideo = candidates.first()
-                open(Page.YOUTUBE)
-            }
+    private fun dispatchPendingVideo(view: WebView, token: Int) {
+        if (webView !== view || generation != token || !playbackAllowed || released) return
+        val request = videoSelection.claim() ?: return
+        // The packaged function queues this selection until the official IFrame player is ready.
+        // Missing HTML functions must not consume a tap; retry after page-ready/poll callbacks.
+        view.evaluateJavascript("(function(){if(typeof window.binteumPlayVideo !== 'function')return false;window.binteumPlayVideo(${JSONObject.quote(request.videoId)});return true;})()") { accepted ->
+            if (webView !== view || generation != token || released) return@evaluateJavascript
+            if (videoSelection.acknowledge(request, accepted == "true")) dispatchPendingVideo(view, token)
         }
     }
 
@@ -405,7 +440,8 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
 
     private fun refreshActions() {
         launchButtons.forEach { it.isEnabled = playbackAllowed && !released }
-        if (::reopenButton.isInitialized) reopenButton.isEnabled = playbackAllowed && !released && selectedPage != null
+        if (::reopenButton.isInitialized) reopenButton.isEnabled = playbackAllowed && !released && selectedPage != null &&
+            (selectedPage != Page.YOUTUBE || browseMode || candidates.any { it.id == selectedVideo.id })
         if (::closeButton.isInitialized) {
             closeButton.isEnabled = webView != null && !released
             closeButton.visibility = if (webView != null) View.VISIBLE else View.GONE
@@ -465,7 +501,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         }
         destroySurface()
         selectedPage = page
-        playWhenReady = play
+        if (play && page == Page.YOUTUBE) videoSelection.select(selectedVideo.id)
         refreshPresentation()
         lastWebState = ""
         val origin = "https://${context.packageName.lowercase()}"
@@ -528,10 +564,8 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             override fun onPageFinished(view: WebView, url: String) {
                 if (webView === view && token == generation && pollingGeneration != token) {
                     applyHtmlPalette(view)
-                    if (playWhenReady && selectedPage == Page.YOUTUBE) {
-                        playWhenReady = false
-                        view.evaluateJavascript("window.binteumPlayVideo && window.binteumPlayVideo(${JSONObject.quote(selectedVideo.id)});", null)
-                    }
+                    videoSelection.markDocumentReady()
+                    dispatchPendingVideo(view, token)
                     pollingGeneration = token
                     pollState(view, token)
                 }
@@ -557,6 +591,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (webView === view) {
                     generation++
+                    videoSelection.reset()
                     webView = null
                     frame.removeView(view)
                     frame.visibility = View.GONE
@@ -577,6 +612,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
 
     private fun pollState(view: WebView, token: Int) {
         if (webView !== view || generation != token || !playbackAllowed || released) return
+        dispatchPendingVideo(view, token)
         view.evaluateJavascript("(function(){return window.binteumStatus || null;})()") { value ->
             if (webView !== view || generation != token || !playbackAllowed || released) return@evaluateJavascript
             val info = runCatching {
@@ -634,7 +670,7 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
 
     private fun destroySurface() {
         generation++
-        playWhenReady = false
+        videoSelection.reset()
         val previous = webView
         webView = null
         if (previous != null) {

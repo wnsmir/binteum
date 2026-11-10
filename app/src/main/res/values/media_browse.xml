@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="media_browse_heading">영상 · 전체 %1$d개</string>
+    <string name="media_unknown_heading">영상 · 충전시간 확인 중</string>
+    <string name="media_unknown_duration">충전 예상시간이 없어 길이를 비교할 수 없어요. 원하는 영상은 직접 선택할 수 있어요.</string>
+    <string name="media_browse_duration">길이 안내는 마무리 2분을 포함해요. 추천과 무관하게 직접 선택할 수 있어요. 광고·로딩 시간은 별도예요.</string>
+    <string name="media_fits_duration">예상 여유시간에 맞는 길이 · 직접 재생</string>
+    <string name="media_exceeds_duration">마무리 여유까지 포함하면 시간이 부족해요 · 직접 재생 가능</string>
+    <string name="media_unknown_choice">시간 비교 불가 · 직접 재생</string>
+</resources>

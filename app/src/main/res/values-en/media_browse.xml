@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="media_browse_heading">Videos · Available videos: %1$d</string>
+    <string name="media_unknown_heading">Videos · Charging time unavailable</string>
+    <string name="media_unknown_duration">Charging time is unavailable, so duration cannot be compared. You can still choose a video.</string>
+    <string name="media_browse_duration">Duration advice includes 2 minutes to finish. You can choose any video, regardless of recommendations. Ads and loading are extra.</string>
+    <string name="media_fits_duration">Fits estimated available time · Play</string>
+    <string name="media_exceeds_duration">May exceed available time including the reserve · Play anyway</string>
+    <string name="media_unknown_choice">Duration fit unknown · Play</string>
+</resources>

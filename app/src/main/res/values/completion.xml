@@ -1,8 +1,5 @@
 <resources>
-<string name="voice_complete">"설정한 시간이 끝났습니다."</string>
-<string name="voice_heading">"시간 완료 알림"</string>
 <string name="voice_enabled">"음성 안내"</string>
-<string name="voice_detail">"시간이 끝나면 Pleos 음성으로 한 번 안내합니다. 앱 화면이 열려 있고 차량 상태가 확인된 경우에만 동작합니다. 외부 앱·화면 꺼짐·앱 종료 중에는 안내하지 않습니다."</string>
 <string name="voice_test">"음성 미리 듣기"</string>
 <string name="voice_test_detail">"현재 앱 언어로 완료 문장을 재생합니다. 기기의 음량 설정이 적용됩니다."</string>
 <string name="voice_play">"재생"</string>

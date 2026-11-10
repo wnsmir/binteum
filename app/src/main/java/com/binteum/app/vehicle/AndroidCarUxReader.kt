@@ -4,6 +4,7 @@ import android.car.Car
 import android.car.VehiclePropertyIds
 import android.car.drivingstate.CarUxRestrictions
 import android.car.drivingstate.CarUxRestrictionsManager
+import android.car.hardware.CarPropertyConfig
 import android.car.hardware.CarPropertyValue
 import android.car.hardware.property.CarPropertyManager
 import android.car.hardware.property.EvChargeState
@@ -13,6 +14,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.SystemClock
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** Kept separate so a device without the optional android.car library can fail closed. */
 internal class AndroidCarUxReader(
@@ -24,7 +27,11 @@ internal class AndroidCarUxReader(
     private var manager: CarUxRestrictionsManager? = null
     private var propertyManager: CarPropertyManager? = null
     private val worker = Executors.newSingleThreadExecutor()
+    // Optional ETA/target reads must never delay the mandatory charge-state observation.
+    private val detailsWorker = Executors.newSingleThreadExecutor()
+    private var detailsBusy = false
     private var active = false
+    val isConnected: Boolean get() = active && car?.isConnected == true && manager != null && propertyManager != null
     private val listener = CarUxRestrictionsManager.OnUxRestrictionsChangedListener {
         // Re-read the current manager so a queued event from an old connection cannot unlock UI.
         if (active) refresh()
@@ -59,6 +66,90 @@ internal class AndroidCarUxReader(
     }
 
     data class ChargeObservation(val charging: Boolean?, val changedAtMillis: Long, val status: String)
+
+    data class ChargeDetailsObservation(
+        val remainingSeconds: Int? = null,
+        val targetPercent: Int? = null,
+        val sampledAtMillis: Long? = null,
+        val status: String = "AAOS charge estimate unavailable",
+    )
+
+    /** A separate current read confirms a Pleos write; its setter callback only echoes input. */
+    fun readChargeTarget(onComplete: (Int?) -> Unit) {
+        val properties = propertyManager
+        if (!active || properties == null || car?.isConnected != true ||
+            context.checkSelfPermission(Car.PERMISSION_ENERGY) != PackageManager.PERMISSION_GRANTED) {
+            onComplete(null)
+            return
+        }
+        detailsWorker.execute {
+            val target = runCatching {
+                val value = properties.getProperty<Float>(VehiclePropertyIds.EV_CHARGE_PERCENT_LIMIT, 0)
+                val raw = value?.value
+                if (value?.status != CarPropertyValue.STATUS_AVAILABLE || raw == null || !raw.isFinite() || raw !in 1f..100f) null
+                else raw.roundToInt().takeIf { abs(raw - it) < .001f }
+            }.getOrNull()
+            handler.post {
+                if (active) onComplete(target.takeIf { car?.isConnected == true && propertyManager === properties })
+            }
+        }
+    }
+
+    /** Optional properties. Failure never changes the separately observed charge or UX state. */
+    fun readChargeDetails(onComplete: (ChargeDetailsObservation) -> Unit) {
+        val properties = propertyManager
+        if (!active || detailsBusy || properties == null || car?.isConnected != true ||
+            context.checkSelfPermission(Car.PERMISSION_ENERGY) != PackageManager.PERMISSION_GRANTED) {
+            onComplete(ChargeDetailsObservation())
+            return
+        }
+        detailsBusy = true
+        detailsWorker.execute {
+            fun readable(id: Int, type: Class<*>): Boolean = runCatching {
+                val config = properties.getCarPropertyConfig(id)
+                config != null && (config.access and CarPropertyConfig.VEHICLE_PROPERTY_ACCESS_READ) != 0 &&
+                    config.propertyType == type
+            }.getOrDefault(false)
+
+            fun readTarget(): Pair<Int, Long>? = runCatching {
+                if (!readable(VehiclePropertyIds.EV_CHARGE_PERCENT_LIMIT, Float::class.javaObjectType)) null
+                else properties.getProperty<Float>(VehiclePropertyIds.EV_CHARGE_PERCENT_LIMIT, 0)?.let { value ->
+                    val raw = value.value
+                    if (value.status != CarPropertyValue.STATUS_AVAILABLE || !raw.isFinite() || raw !in 1f..100f) null
+                    else raw.roundToInt().takeIf { abs(raw - it) < .001f }?.let { it to value.timestamp }
+                }
+            }.getOrNull()
+            val targetBefore = readTarget()
+            val estimate = runCatching {
+                if (!readable(VehiclePropertyIds.EV_CHARGE_TIME_REMAINING, Int::class.javaObjectType)) null
+                else properties.getProperty<Int>(VehiclePropertyIds.EV_CHARGE_TIME_REMAINING, 0)?.let { value ->
+                    val age = SystemClock.elapsedRealtimeNanos() - value.timestamp
+                    // Unlike ON_CHANGE charge state, this is a CONTINUOUS measurement. Reject
+                    // stale/future/absent sample timestamps; a re-read must not restart its clock.
+                    if (value.status != CarPropertyValue.STATUS_AVAILABLE || value.timestamp <= 0L ||
+                        age !in 0L..30_000_000_000L || value.value !in 1..604_800 ||
+                        (targetBefore != null && value.timestamp < targetBefore.second)) null
+                    else value.value to (System.currentTimeMillis() - age / 1_000_000L)
+                }
+            }.getOrNull()
+            // These properties are not an atomic snapshot. A limit change during the reads
+            // invalidates this ETA instead of attaching an old estimate to the new target.
+            val targetAfter = readTarget()
+            val target = targetAfter?.first
+            val coherentEstimate = estimate.takeIf {
+                targetBefore == targetAfter && (targetAfter?.second ?: 0L) > 0L
+            }
+            val estimateLabel = coherentEstimate?.first?.toString() ?: "unavailable"
+            val targetLabel = target?.toString() ?: "unavailable"
+            val observation = ChargeDetailsObservation(coherentEstimate?.first, target, coherentEstimate?.second,
+                "AAOS ETA seconds: $estimateLabel / vehicle target percent: $targetLabel")
+            handler.post {
+                detailsBusy = false
+                if (active) onComplete(if (car?.isConnected == true && propertyManager === properties) observation
+                    else ChargeDetailsObservation())
+            }
+        }
+    }
 
     fun readChargeState(onComplete: (ChargeObservation) -> Unit) {
         if (!active || context.checkSelfPermission(Car.PERMISSION_ENERGY) != PackageManager.PERMISSION_GRANTED) {
@@ -138,5 +229,6 @@ internal class AndroidCarUxReader(
         runCatching { car?.disconnect() }
         car = null
         worker.shutdownNow()
+        detailsWorker.shutdownNow()
     }
 }

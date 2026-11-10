@@ -1,7 +1,5 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">"Binteum"</string>
-    <string name="battery_percent">"Battery %1$d%%"</string>
-    <string name="battery_unknown">"Battery —"</string>
     <string name="video_recommendation_heading">"Time left: %1$02d:%2$02d · Videos: %3$d"</string>
     <string name="video_duration">"%1$d:%2$02d"</string>
     <!-- Abbreviated min/sec units are invariant for singular and plural. -->
@@ -10,9 +8,6 @@
     <string name="reminder_target">"Battery target"</string>
     <string name="reminder_time_selected">"✓ Time"</string>
     <string name="reminder_target_selected">"✓ Battery target"</string>
-    <string name="netflix_external">"Open app or website ↗"</string>
-    <string name="netflix_external_detail">"Sign-in and membership required · Playback depends on device support\nTime-based recommendations and playback controls apply only to YouTube."</string>
-    <string name="netflix_external_accessibility">"Open Netflix in an external app or browser."</string>
     <string name="netflix_unavailable">"Cannot open Netflix. A supported app or browser is required."</string>
     <string name="language">"Language"</string>
     <string name="language_detail">"Choose the language for app menus and messages. Video titles and external services use their own language."</string>
@@ -28,11 +23,8 @@
     <string name="sky_sunset">"Sunset"</string>
     <string name="sky_night">"Night"</string>
     <string name="activity_interrupted">"%1$s Activity stopped. Preferences are unchanged."</string>
-    <string name="target_reached_percent">"Reached %1$d%%"</string>
     <string name="target_session_complete">"Reached the %1$d%% target. Start a new session for the next charge."</string>
     <string name="vehicle_checks">"Battery: %1$s · Charging: %2$s · Restrictions: %3$s"</string>
-    <string name="reset_minutes">"Start a new %1$d-minute timer"</string>
-    <string name="minute_reminder">"%1$d-minute reminder"</string>
     <string name="dial_accessibility">"%1$s %2$s, drag to adjust"</string>
     <string name="current_content">"Now playing · %1$s"</string>
     <string name="recent_content">"Recent content · %1$s"</string>

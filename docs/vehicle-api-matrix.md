@@ -24,6 +24,9 @@
 | SOC % | `checkEvBatteryStateOfChargeCapabilities`, `getEvBatteryStateOfCharge` | `pleos.car.permission.CAR_ENERGY`; READ 또는 READ_WRITE | 0..100 Int만 사용. null/오류/미지원은 미확인. 원본 측정시각 미제공 |
 | 충전 시작/정지 요청 스위치 | `checkEvChargeSwitchCapabilities`, `getEvChargeSwitchState` | 동일한 Pleos 읽기 권한 | 별도 `chargeSwitchEnabled` 진단값. **실제 충전 중 판정으로 사용하지 않음** |
 | 실제 충전 상태 | `CarPropertyManager.getProperty<Int>(VehiclePropertyIds.EV_CHARGE_STATE, 0)` | `android.car.permission.CAR_ENERGY` 런타임 허가 + 실제 VHAL 지원 | AAOS `STATE_CHARGING`만 true. NOT_CHARGING/FULLY_CHARGED/ERROR는 false. UNKNOWN·미지원·권한 거부·실패는 null |
+| 차량 충전 예상 잔여 시간 | `EV_CHARGE_TIME_REMAINING`의 Int 초·원본 timestamp | `android.car.permission.CAR_ENERGY`, 읽기 capability 및 CONTINUOUS 샘플 | 2026-11-10 선택 읽기 연결. 실제 충전 중이고 원본 샘플이 30초 이내인 양수 값만 전달. 0·미지원·실패는 예상시간 미확인으로 처리 |
+| 차량의 목표 충전량 | `EV_CHARGE_PERCENT_LIMIT`의 Float % | 같은 AAOS 읽기 권한 및 읽기 capability | 2026-11-10 읽기 연결. 현재 모델은 정확한 정수 1..100%만 수용하며 앱에서 고른 목표와 구분 |
+| 명시적 차량 목표 적용 | Pleos `checkEvChargePercentLimitCapabilities`, `setEvChargePercentLimit` + AAOS 현재 값 재조회 | `pleos.car.permission.CONTROL_CAR_ENERGY` normal 권한, READ_WRITE capability, 지원 목표값, 신선한 안전 상태 | 사용자 적용 동작에서만 호출. 8초 안에 별도 readback이 일치해야 성공. timeout은 미적용 보장이 아니라 적용 여부 미확인. 충전 시작/중지·전류 제어는 호출하지 않음 |
 | 주행 UX 제한 | `CarUxRestrictionsManager.registerListener`, `getCurrentCarUxRestrictions`, `unregisterListener` | AAOS Car Service 연결 | DO 필요 또는 baseline 이외 제한이 하나라도 있으면 보수적으로 잠금. 미확인도 사용 허가로 처리하지 않음. 기어 P/브레이크로 추론하지 않음 |
 | 활성 상태 | `PowerManager.isInteractive`, 화면 on/off, 소유 Activity의 start/stop | Android 디바이스 상태 | 기존 `vehicleAwake` 필드는 현재 디바이스에서 UI를 관측 가능한 상태인지 나타내는 대용값. **실제 IGN 신호가 아님** |
 | 실패·재시작 | 세션/읽기 식별자, 제한 시간, release | callback이 오지 않을 수도 있음 | capability 20초, 읽기 3초 timeout; 정상 읽기 종료 후 3초 간격. timeout 뒤 무한 재요청하지 않고 재연결 필요. 종료 뒤 늦은 callback 무시 |
@@ -41,18 +44,22 @@ Pleos의 [`getEvChargeSwitchState`](https://document.pleos.ai/docs/pleos-only/co
 - Pleos SOC 콜백에는 원본 측정시각이 없다. SOC의 관측 기준은 **이번 읽기를 시작한 시각**이며, 이전 값을 재표시할 때 현재 시각으로 갱신하지 않는다. 차량 서비스 내부 캐시의 신선도까지 보장하지 못한다.
 - AAOS 충전 값은 현재 연결에서 새 `getProperty` 요청이 성공하고 `STATUS_AVAILABLE`인지 확인한다. 스냅샷 관측시각은 해당 읽기 요청을 시작한 시각이다. `CarPropertyValue.timestamp`는 별도의 `chargeStateChangedAtMillis`로 보존한다. 부팅 기준 ns를 epoch ms로 변환하며 사용할 수 없는 timestamp는 별도 값만 null로 둔다.
 - ONCHANGE 속성의 timestamp는 마지막 상태 변경 시각이므로 정상적으로 충전 상태가 유지되어도 오래될 수 있다. 새 서비스 읽기의 성공을 관측시각으로 사용하되, 원본 상태 변경 시각을 현재 시각으로 덮어쓰지 않는다. 30초 stale 정책은 성공한 읽기 이후 응답이 끊긴 경우에 적용한다. 차량 서비스 내부 값의 신선도까지 보장하는 것은 아니다.
+- ETA는 CONTINUOUS 속성이므로 ONCHANGE 충전 상태와 다른 계약을 적용한다. 원본 샘플 timestamp가 없거나 미래이거나 30초보다 오래되면 사용하지 않는다. `chargeTimeObservedAtMillis`를 그대로 전달하며 같은 값을 재게시해 카운트다운을 다시 시작하지 않는다. ETA·차량 목표는 별도 worker와 3초 제한시간으로 읽고, 이 선택 값의 실패는 SOC·실제 충전 상태·UX 읽기를 중단시키지 않는다.
+- ETA 읽기 전후의 목표값·원본 변경 timestamp가 일치하는지 검사하며 ETA 샘플이 목표 변경보다 앞서면 버린다. 앱의 목표 쓰기 readback 성공 시 이전 ETA와 진행 중 선택 읽기를 무효화한다. 목표가 변경된 뒤 새로운 차량 ETA가 올 때까지 이전 목표의 시간을 새 목표 시간으로 표시하지 않는다.
 - 화면 off/on을 걸친 응답을 재사용하지 않는다. 화면이 닫히면 연결을 해제한다. 차량 밖 휴대폰으로 충전을 계속 감시하거나 IGN OFF 뒤 알림을 보장하는 서비스는 구현하지 않았다.
 - [Pleos Suspend 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/audio-focus-development-guide/suspend-mode-audio-focus)에 따르면 IGN OFF 후 UI·일반 오디오 등이 중단될 수 있다. `isInteractive`를 IGN 상태로 이름만 바꾸어 사용할 수 없다.
 
 ### 선언 범위
 
-현재 읽기 연결에 필요한 것은 `implementation("ai.pleos.playground:Vehicle:2.3.2")`, `useLibrary("android.car")`, 선택적 `android.car` uses-library, Pleos/Android 각각의 `CAR_ENERGY`다. 두 권한의 접두사와 허가 방식이 다르다. Pleos 읽기 권한은 SDK의 normal 권한이며 AAOS energy는 런타임 dangerous 권한이다. `CONTROL_CAR_*`, `PRIVATE_*`, 위치·마이크 권한은 이 연결에 필요하지 않다.
+현재 읽기 연결에 필요한 것은 `implementation("ai.pleos.playground:Vehicle:2.3.2")`, `useLibrary("android.car")`, 선택적 `android.car` uses-library, Pleos/Android 각각의 `CAR_ENERGY`다. 두 권한의 접두사와 허가 방식이 다르다. Pleos 읽기 권한은 SDK의 normal 권한이며 AAOS energy는 런타임 dangerous 권한이다.
+
+2026-11-10 명시적 목표 적용에는 `pleos.car.permission.CONTROL_CAR_ENERGY`를 추가했다. 공식 2.3.2 sources.jar의 `EvBattery.setEvChargePercentLimit` 설명과 이 에뮬레이터 권한 정의 모두 이 Pleos 권한을 **normal**로 표시한다. AAOS의 별개 `android.car.permission.CONTROL_CAR_ENERGY`는 signature/privileged이며 선언·요청하지 않는다. Pleos setter 성공 콜백은 요청값을 돌려주므로 실제 적용 확인은 AAOS `EV_CHARGE_PERCENT_LIMIT`의 새 읽기로 한다. SDK 2.3.2에는 별도 `getEvChargePercentLimit`가 없다. 서버 연결 끊김·늦은 응답·미지원·안전 상태 유실 시 성공으로 표시하거나 자동 재시도하지 않는다.
 
 공식 문서상 Vehicle 권한 사용은 [앱 마켓과 협의·승인된 범위](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/)를 따라야 한다. manifest 선언과 에뮬레이터 허가는 배포 승인과 다르다. 이번 작업은 공개 SDK를 이용한 개발·검증이며 마켓 승인 신청을 대신하지 않는다.
 
 ## Vehicle 19개 영역 요약
 
-아래 `C/R/W/S/U`는 capability 확인 / 읽기 / 제어 / 구독 / 구독 해제를 뜻한다. 실제 지원은 연결된 차량의 capability 및 area/bounds에 따른다. 모든 영역의 배포물 메서드를 정적으로 확인했지만, 빈틈의실은 EV 읽기 네 메서드만 연결한다. 다른 영역은 앱에서 호출하지 않는다.
+아래 `C/R/W/S/U`는 capability 확인 / 읽기 / 제어 / 구독 / 구독 해제를 뜻한다. 실제 지원은 연결된 차량의 capability 및 area/bounds에 따른다. 모든 영역의 배포물 메서드를 정적으로 확인했지만, 빈틈의실은 EV 데이터 읽기와 명시적 목표량 설정을 연결한다. 다른 영역은 앱에서 호출하지 않는다.
 
 | 영역 | 메서드 수 (C/R/W/S/U) | 확인한 기능 | 필요한 권한 종류 | 앱 활용 |
 | --- | --- | --- | --- | --- |
@@ -61,7 +68,7 @@ Pleos의 [`getEvChargeSwitchState`](https://document.pleos.ai/docs/pleos-only/co
 | [Display](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/display/entry) | 4 (1/1/0/1/1) | 온도 표시 단위 | `CAR_INFO` | 차량 온도 콘텐츠를 확장할 때 검토 |
 | [Door](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/door/entry) | 15 (3/3/3/3/3) | 도어 위치/잠금·글로브박스 잠금 | `CAR_DOORS` / `CONTROL_CAR_DOORS` | 문 상태 기반 외출 추론·제어를 하지 않음 |
 | [DrivingMode](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/driving-mode/entry) | 12 (3/3/0/3/3) | 주행 모드·크루즈 상태/목표 속도 | `CAR_DRIVE` | 주행 제한은 이 값이 아니라 AAOS UX를 사용 |
-| [EvBattery](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/entry) | 30 (9/7/4/5/5) | SOC·충전 요청 스위치/한도·전비 | `CAR_ENERGY` / `CONTROL_CAR_ENERGY` | SOC+요청 스위치 읽기만 연결, 실제 상태는 별도 AAOS |
+| [EvBattery](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/entry) | 30 (9/7/4/5/5) | SOC·충전 요청 스위치/한도·전비 | `CAR_ENERGY` / `CONTROL_CAR_ENERGY` | SOC+요청 스위치 읽기 및 명시적 목표량 설정. 실제 상태·ETA·목표 readback은 AAOS |
 | [Fuel](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/fuel/entry) | 20 (5/5/0/5/5) | 연료 비율·현재/구간/누적 연비 | `CAR_ENERGY` | EV 중심 MVP에서 제외 |
 | [HVAC](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/h-v-a-c/entry) | 72 (14/15/13/15/15) | 에어컨·자동/순환·제상·팬·전원·온도·공기청정 | `CAR_CLIMATE` / `CONTROL_CAR_CLIMATE` | 휴식 연출용 자동 제어 제외, 추후 명시적 사용자 기능만 검토 |
 | [Light](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/light/entry) | 71 (19/19/11/11/11) | 실내/독서/전조/안개/후미·무드등·주행모드 연동 | `CAR_LIGHTS` / `CONTROL_CAR_LIGHTS` | 분위기 자동 제어 제외 |
@@ -102,7 +109,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | 항목 | 공식 근거·지원 범위 | 앱 판단 |
 | --- | --- | --- |
 | 주행 제한 | [CarUxRestrictions 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/driving-restriction-development-guide); 시스템이 지역별 active flags 제공 | listener+현재 값 조회 연결. `NO_VIDEO` 등의 조건 반영. P단/충전만으로 영상 허용을 추론하지 않음 |
-| 충전 ETA | [AAOS EV_CHARGE_TIME_REMAINING](https://developer.android.com/reference/android/car/VehiclePropertyIds#EV_CHARGE_TIME_REMAINING), 초 단위 추정치, 미충전 시 0 | 표준 API 정의는 확인했지만 우리 어댑터에는 아직 미연결. Pleos VHAL 지원/갱신/차량 목표 SOC 관계 미검증. 현재 사용자 시간 예산을 충전기 ETA로 표기하지 않음 |
+| 충전 ETA | [AAOS EV_CHARGE_TIME_REMAINING](https://developer.android.com/reference/android/car/VehiclePropertyIds#EV_CHARGE_TIME_REMAINING), Int 초·CONTINUOUS, 미충전 시 0 | 선택 읽기 연결. 2026-11-10 에뮬레이터 VHAL에 읽기·1–10Hz 지원과 0초 이벤트 확인. 이는 충전 중 ETA·정확도 검증이 아님. 앱 임의 목표에 차량 ETA를 비례 환산하지 않음 |
 | 충전 포트 | [AAOS EV_CHARGE_PORT_CONNECTED](https://developer.android.com/reference/android/car/VehiclePropertyIds#EV_CHARGE_PORT_CONNECTED), 별도 `CAR_ENERGY_PORTS` 읽기 권한 | 선택 후속 진단 후보. 포트 연결 true 역시 실제 충전 중과 다름. 현재 미연결 |
 | 오디오·Suspend | [오디오 Suspend 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/audio-focus-development-guide/suspend-mode-audio-focus) | 중단 시 오디오/일시적 연결 정리, 재개 시 현재 안전 상태 재평가. 운전자 부재 동안 항상 켜짐 보장 없음 |
 | 하드키·회전 입력 | [CCP 가이드](https://document.pleos.ai/docs/pleos-only/vehicle-app-developer-guide/ccp-rotary-controller-development) | 사용자 설치 앱의 CCP 지원은 선택 가능. 터치로 필수 기능 완결, 미지원 메타데이터/최상위 Back hide 처리 확인 필요 |
@@ -221,7 +228,7 @@ TTS/STT의 sources classifier는 이번 공개 저장소 요청에서 제공되�
 | [registerInstantaneousEvEfficiency](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/register-instantaneous-ev-efficiency) | S | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [registerSinceChargeEvEfficiency](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/register-since-charge-ev-efficiency) | S | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [setEvChargeCurrentDrawLimit](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/set-ev-charge-current-draw-limit) | W | `CONTROL_CAR_ENERGY` | 확인 / 미연결 / 미검증 |
-| [setEvChargePercentLimit](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/set-ev-charge-percent-limit) | W | `CONTROL_CAR_ENERGY` | 확인 / 미연결 / 미검증 |
+| [setEvChargePercentLimit](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/set-ev-charge-percent-limit) | W | `CONTROL_CAR_ENERGY` | 확인 / 명시적 적용+readback 연결 / 실제 쓰기 미검증 |
 | [setEvChargePortOpen](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/set-ev-charge-port-open) | W | `CONTROL_CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [setEvChargeSwitch](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/set-ev-charge-switch) | W | `CONTROL_CAR_ENERGY` | 확인 / 미연결 / 미검증 |
 | [unregisterCumulativeEvEfficiency](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/ev-battery/unregister-cumulative-ev-efficiency) | U | `CAR_ENERGY` | 확인 / 미연결 / 미검증 |

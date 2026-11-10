@@ -1,8 +1,5 @@
 <resources>
-<string name="voice_complete">"Your timer has finished."</string>
-<string name="voice_heading">"Timer completion"</string>
 <string name="voice_enabled">"Voice announcement"</string>
-<string name="voice_detail">"Announce completion once using Pleos speech while this app is visible and vehicle status is verified. Unavailable in other apps, with the screen off, or after closing the app."</string>
 <string name="voice_test">"Preview announcement"</string>
 <string name="voice_test_detail">"Play the completion message in the app language using the device volume."</string>
 <string name="voice_play">"Play"</string>

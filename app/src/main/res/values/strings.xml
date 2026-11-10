@@ -1,7 +1,5 @@
 <resources>
     <string name="app_name">"빈틈의실"</string>
-    <string name="battery_percent">"배터리 %1$d%%"</string>
-    <string name="battery_unknown">"배터리 —"</string>
     <string name="video_recommendation_heading">"남은 시간 %1$02d:%2$02d · 추천 %3$d개"</string>
     <string name="video_duration">"%1$d:%2$02d"</string>
     <string name="video_card_description">"%1$s, %2$d분 %3$d초, 이 화면에서 재생"</string>
@@ -9,9 +7,6 @@
     <string name="reminder_target">"목표 잔량"</string>
     <string name="reminder_time_selected">"✓ 시간"</string>
     <string name="reminder_target_selected">"✓ 목표 잔량"</string>
-    <string name="netflix_external">"앱·웹에서 열기 ↗"</string>
-    <string name="netflix_external_detail">"로그인·멤버십 필요 · 기기 지원에 따라 재생 가능\n남은 시간 추천과 재생 제어는 YouTube에만 적용됩니다."</string>
-    <string name="netflix_external_accessibility">"Netflix 앱 또는 웹에서 열기. 외부 화면으로 이동합니다."</string>
     <string name="netflix_unavailable">"Netflix를 열 수 없습니다. 지원 앱 또는 브라우저가 필요합니다."</string>
     <string name="language">"언어"</string>
     <string name="language_detail">"앱의 메뉴와 안내 언어를 선택합니다. 영상 제목과 외부 서비스는 해당 서비스의 언어를 따릅니다."</string>
@@ -27,11 +22,8 @@
     <string name="sky_sunset">"저녁 노을"</string>
     <string name="sky_night">"밤"</string>
     <string name="activity_interrupted">"%1$s 활동을 중단했어요. 취향 평가에는 반영하지 않아요."</string>
-    <string name="target_reached_percent">"%1$d%%에 도달했어요"</string>
     <string name="target_session_complete">"이번 세션의 %1$d%% 목표에 도달했어요. 다음 충전을 시작할 때 새 세션을 열어 주세요."</string>
     <string name="vehicle_checks">"배터리 잔량 %1$s · 충전 상태 %2$s · 화면 제한 %3$s"</string>
-    <string name="reset_minutes">"%1$d분 대기시간 새로 설정"</string>
-    <string name="minute_reminder">"%1$d분 알림"</string>
     <string name="dial_accessibility">"%1$s %2$s, 돌려서 변경"</string>
     <string name="current_content">"현재 콘텐츠 · %1$s"</string>
     <string name="recent_content">"최근 콘텐츠 · %1$s"</string>

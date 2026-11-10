@@ -16,7 +16,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "com.binteum.app.TtsSdkProbe"
+        testInstrumentationRunner = providers.gradleProperty("binteumTestRunner")
+            .getOrElse("com.binteum.app.ChargeExperienceProbe")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
