@@ -230,8 +230,10 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        tab = savedInstanceState?.getInt("tab", 0) ?: 0
-        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..6 }?.takeLast(16)?.forEach(screenHistory::addLast)
+        tab = canonicalTab(savedInstanceState?.getInt("tab", 0) ?: 0)
+        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..6 }?.map(::canonicalTab)
+            ?.takeLast(16)?.forEach { if (screenHistory.lastOrNull() != it) screenHistory.addLast(it) }
+        while (screenHistory.lastOrNull() == tab) screenHistory.removeLast()
         activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
         themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
@@ -275,7 +277,8 @@ class MainActivity : Activity() {
         locationReader = VehicleLocationReader(this)
         nearbyClient = NearbySuggestionsClient()
         comfort = ComfortController(this) { !demoMode && safeToConfigure() && tab == 5 && nap == null }
-        restoreCheckpoint()
+        // Retired guided activities must not reappear after an app update or process restore.
+        prefs.edit().remove("chargeActivityCheckpoint").apply()
         session = ChargingSession(target, targetEnabled = false)
         render()
     }
@@ -427,9 +430,9 @@ class MainActivity : Activity() {
     }
     private fun remainingWindowSeconds(): Int = chargeWindow().seconds ?: Int.MAX_VALUE
     private fun windowContentKey(): String = listOf(allowed(), chargeEstimate().source, target,
-        UsagePreferences.timeBucket(chargeWindow().seconds), recommendationSeconds()?.let { seconds ->
-            (ActivityCatalog.all + ActivityCatalog.guided).filter { it.durationSeconds + 120 <= seconds }.map { it.id }
-        }, VideoCatalog.recommend(recommendationSeconds()).map { it.id }).joinToString("/")
+        UsagePreferences.timeBucket(chargeWindow().seconds), recommendationSeconds()?.let { listOf(it >= 420, it >= 1200, it >= 1800) },
+        VideoCatalog.recommend(recommendationSeconds()).map { it.id },
+        MusicCatalog.recommend(recommendationSeconds()).map { it.name }).joinToString("/")
     private fun remainingActivitySeconds(run: Run): Int {
         val duration = ActivityCatalog.find(run.activityId)?.durationSeconds ?: return 0
         return (duration - (SystemClock.elapsedRealtime() - run.startedElapsed).coerceAtLeast(0) / 1000).coerceAtLeast(0).toInt()
@@ -567,8 +570,7 @@ class MainActivity : Activity() {
         completed != null -> tx("활동 마무리", "Finish activity")
         tab == 1 -> tx("영상", "Videos")
         tab == 2 -> tx("설정", "Settings")
-        tab == 3 -> tx("활동", "Activities")
-        tab == 4 -> nearbyKind?.let(::nearbyTitle) ?: tx("주변", "Nearby")
+        tab == 4 -> nearbyKind?.let(::nearbyTitle) ?: tx("활동", "Activities")
         tab == 5 -> tx("낮잠", "Nap")
         tab == 6 -> tx("음악", "Music")
         else -> tx("대시보드", "Dashboard")
@@ -592,8 +594,7 @@ class MainActivity : Activity() {
             listOf(Triple(0, tx("대시보드", "Dashboard"), AppIcon.DASHBOARD),
                 Triple(1, tx("영상", "Videos"), AppIcon.PLAY),
                 Triple(6, tx("음악", "Music"), AppIcon.MUSIC),
-                Triple(3, tx("활동", "Activities"), AppIcon.LEAF),
-                Triple(4, tx("주변", "Nearby"), AppIcon.MAP),
+                Triple(4, tx("활동", "Activities"), AppIcon.MAP),
                 Triple(5, tx("낮잠", "Nap"), AppIcon.BED)).forEach { (destination, title, glyph) ->
                 addView(button(title, tab == destination) { navigateTo(destination) }.apply {
                     textSize = 18f
@@ -714,15 +715,7 @@ class MainActivity : Activity() {
             tab == 2 -> buildSettings(this)
             tab == 5 && safeToConfigure() -> buildNap(this)
             !allowed() -> buildBlockedState(addReadingColumn(this))
-            recovery != null -> {
-                addView(label(tx("이어 할 활동이 있어요", "Resume your activity"), 30f, true))
-                addView(button(tx("이어서 하기", "Resume"), true) { resumeActivity() })
-                addView(button(tx("마치기", "End activity")) { recovery?.let { finishChoice(it, false) }; recovery = null; saveCheckpoint(); render() })
-            }
-            active != null -> buildActive(addReadingColumn(this), active!!)
-            completed != null -> buildFeedback(addReadingColumn(this), completed!!)
             tab == 1 -> buildMedia(this)
-            tab == 3 -> buildActivities(this)
             tab == 4 -> buildNearby(this)
             tab == 5 -> buildNap(this)
             tab == 6 -> buildMusic(this)
@@ -819,7 +812,14 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun navigateTo(destination: Int, remember: Boolean = true) {
+    private fun canonicalTab(value: Int): Int = when (value) {
+        3 -> 4 // Old in-car activities now open the unified nearby activity screen.
+        0, 1, 2, 4, 5, 6 -> value
+        else -> 0
+    }
+
+    private fun navigateTo(requestedDestination: Int, remember: Boolean = true) {
+        val destination = canonicalTab(requestedDestination)
         if (tab == destination) return
         cancelNapTemperatureStart()
         if (tab == 4) { cancelNearbyWork(); nearbyResumeKind = null }
@@ -916,19 +916,16 @@ class MainActivity : Activity() {
             cards.addView(choiceCard(if (budget == null) tx("시간을 확인하고 있어요", "Waiting for a time estimate") else tx("곧 마무리할 시간이에요", "Time to wrap up"),
                 if (budget == null) tx("충전량 변화가 쌓이면 예상시간을 계산해요. 아래 탭에서 원하는 활동을 바로 열 수 있어요.",
                     "An estimate appears after enough charging data. Open any activity from the tabs below.")
-                else tx("긴 활동 추천은 쉬어갈게요. 영상과 활동은 아래 탭에서 직접 선택할 수 있어요.", "Long activities are not recommended now. You can still choose from the tabs."), AppIcon.CLOCK) { navigateTo(3) })
+                else tx("곧 출발할 수 있도록 준비해 주세요. 영상과 음악은 아래 탭에서 직접 선택할 수 있어요.", "Get ready to leave. You can still choose videos or music below."), AppIcon.CLOCK) { navigateTo(6) })
         } else {
-            val feedback = if (learningOn && !demoMode) loadProfile(bucket()).feedback else emptyMap()
-            val available = (ActivityCatalog.all + ActivityCatalog.guided).filter { it.durationSeconds + 120 <= budget }
-                .sortedByDescending { feedback[it.id]?.preference ?: .5 }
             val videos = VideoCatalog.recommend(budget)
-            val categories = listOf(UsageCategory.MUSIC) + (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) + available.map { category(it.kind) }.distinct() +
+            val categories = listOf(UsageCategory.MUSIC) + (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) +
                 (if (budget >= 420) listOf(UsageCategory.NAP) else emptyList()) +
                 (if (budget >= 1200) listOf(UsageCategory.FOOD, UsageCategory.WALK) else emptyList())
             val defaultOrder = when {
                 budget >= 1800 -> listOf(UsageCategory.WALK, UsageCategory.FOOD, UsageCategory.MUSIC, UsageCategory.NAP, UsageCategory.VIDEO)
                 budget >= 900 -> listOf(UsageCategory.MUSIC, UsageCategory.NAP, UsageCategory.VIDEO, UsageCategory.FOOD, UsageCategory.WALK)
-                else -> listOf(UsageCategory.MUSIC, UsageCategory.VIDEO, UsageCategory.REST)
+                else -> listOf(UsageCategory.MUSIC, UsageCategory.VIDEO)
             }
             val ordered = categories.sortedBy { defaultOrder.indexOf(it).takeIf { index -> index >= 0 } ?: defaultOrder.size }
             val ranked = if (learningOn) UsagePreferences.rank(usageRecords, chargeEstimate().seconds, snapshot?.stateOfCharge, ordered) else ordered
@@ -960,27 +957,12 @@ class MainActivity : Activity() {
                         navigateTo(4); nearbyEntry = UsageEntryPoint.RECOMMENDED
                         requestNearby(if (kind == UsageCategory.WALK) NearbyKind.PARK else if (budget < 1800) NearbyKind.CONVENIENCE else NearbyKind.CAFE)
                     })
-                } else {
-                    val activity = available.first { category(it.kind) == kind }
-                    cards.addView(choiceCard(ownTitle(activity), reason, activityIcon(activity.kind)) {
-                        startActivity(activity, UsageEntryPoint.RECOMMENDED)
-                    })
                 }
             }
             if (ranked.isEmpty()) parent.addView(label(tx("지금은 짧게 쉬어보세요. 직접 선택은 아래 탭에서 할 수 있어요.", "Take a short break, or choose from the tabs below."), 24f))
         }
         parent.addView(label(tx("선택한 활동 종류·남은 충전시간·충전량을 이 기기에 기록해 다음 추천에 반영해요. 설정에서 확인·삭제할 수 있어요.",
             "Activity choices, remaining time and battery level stay on this device for recommendations. Review or clear them in Settings."), 19f).apply { setTextColor(muted) })
-    }
-
-    private fun buildActivities(parent: LinearLayout) {
-        parent.addView(label(tx("원하는 활동을 골라보세요", "Choose any activity"), 32f, true))
-        val cards = addCardGrid(parent)
-        (ActivityCatalog.all + ActivityCatalog.guided).forEach { activity ->
-            cards.addView(choiceCard(ownTitle(activity), fitDescription(activity.durationSeconds), activityIcon(activity.kind)) {
-                startActivity(activity, UsageEntryPoint.MANUAL)
-            })
-        }
     }
 
     private fun buildMedia(parent: LinearLayout) {
@@ -1065,7 +1047,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildNearby(parent: LinearLayout) {
-        parent.addView(label(tx("지금 있는 곳에서, 잠깐", "A short break, right nearby"), 32f, true))
+        parent.addView(label(tx("이 근처에서 무엇을 할까요?", "What can you do nearby?"), 32f, true))
         val kind = nearbyKind
         if (kind == null) {
             parent.addView(label(tx("누르면 차량의 현재 위치로 가까운 장소와 도보 왕복시간을 찾아요.", "Choose a category to find places and round-trip walking times from your vehicle."), 22f))
@@ -2014,26 +1996,8 @@ class MainActivity : Activity() {
     }
 
     private fun saveCheckpoint() {
-        val run = active ?: recovery
-        val data = JSONObject().put("savedElapsed", SystemClock.elapsedRealtime()).put("savedWall", System.currentTimeMillis())
-            .put("quizIndex", quizIndex).put("quizAnswer", quizAnswer ?: -1)
-        if (run != null) data.put("run", JSONObject().put("id", run.activityId).put("attempt", run.attemptId)
-            .put("elapsed", run.startedElapsed).put("wall", run.startedWall).put("bucket", run.bucket))
-        prefs.edit().putString("chargeActivityCheckpoint", data.toString()).apply()
-    }
-    private fun restoreCheckpoint() {
-        try {
-            val data = JSONObject(prefs.getString("chargeActivityCheckpoint", "{}") ?: "{}")
-            val deltaElapsed = SystemClock.elapsedRealtime() - data.optLong("savedElapsed")
-            val deltaWall = System.currentTimeMillis() - data.optLong("savedWall")
-            if (deltaElapsed < 0 || deltaWall < 0 || abs(deltaElapsed - deltaWall) > 5_000) return
-            quizIndex = data.optInt("quizIndex").coerceAtLeast(0)
-            quizAnswer = data.optInt("quizAnswer", -1).takeIf { it >= 0 }
-            data.optJSONObject("run")?.let { item ->
-                if (ActivityCatalog.find(item.getString("id")) != null) recovery = Run(item.getString("id"),
-                    item.getString("attempt"), item.getLong("elapsed"), item.getLong("wall"), item.getString("bucket"))
-            }
-        } catch (_: Exception) { prefs.edit().remove("chargeActivityCheckpoint").apply() }
+        // Keep old saved guided sessions retired without deleting the user's choice history.
+        if (prefs.contains("chargeActivityCheckpoint")) prefs.edit().remove("chargeActivityCheckpoint").apply()
     }
 
     private fun persistTarget() {
