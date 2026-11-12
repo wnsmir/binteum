@@ -5,6 +5,7 @@ import ai.pleos.playground.vehicle.api.HVAC
 import ai.pleos.playground.vehicle.api.Seat
 import ai.pleos.playground.vehicle.api.model.area.SeatArea
 import ai.pleos.playground.vehicle.api.model.capability.AccessType
+import ai.pleos.playground.vehicle.api.model.capability.CapabilityConfig
 import ai.pleos.playground.vehicle.constant.PleosPermission
 import ai.pleos.playground.vehicle.constant.area.SeatValue
 import ai.pleos.playground.vehicle.constant.unit.TemperatureUnit
@@ -29,6 +30,16 @@ enum class ComfortStatus {
     CHECKING, APPLIED, RESTORED, CHANGED_ELSEWHERE, UNCONFIRMED,
 }
 
+enum class ComfortReadStatus { NOT_CHECKED, CHECKING, AVAILABLE, UNAVAILABLE, PERMISSION_REQUIRED }
+enum class SeatAdjustment { BACKREST, FORE_AFT, HEIGHT, TILT }
+
+/** Advertised capabilities only. No field authorizes or claims verified seat motion. */
+data class SeatSupport(
+    val status: ComfortReadStatus = ComfortReadStatus.NOT_CHECKED,
+    val backrestPositionReadable: Boolean = false,
+    val movements: Set<SeatAdjustment> = emptySet(),
+)
+
 data class ComfortState(
     val busy: Boolean = false,
     val status: ComfortStatus = ComfortStatus.STOPPED,
@@ -41,6 +52,10 @@ data class ComfortState(
     val canRestore: Boolean = false,
     /** Vehicle-specific raw position, deliberately not presented as degrees or percent. */
     val seatPosition: Int? = null,
+    val seatSupport: SeatSupport = SeatSupport(),
+    /** Measured cabin temperature, distinct from the HVAC target setpoint. */
+    val cabinCelsius: Float? = null,
+    val climatePowerOn: Boolean? = null,
 )
 
 /**
@@ -75,6 +90,8 @@ class ComfortController(
     private var lastRequested: Float? = null
     private var changedArea: SeatArea? = null
     private var operationStartedAt = 0L
+    private var inspection = 0L
+    private var inspectionTimeout: Runnable? = null
 
     var state = ComfortState()
         private set
@@ -117,6 +134,8 @@ class ComfortController(
     /** Read-only inspection; it never enables climate power or changes a setting. */
     fun refresh() = onMain {
         if (!active || state.busy) return@onMain
+        // Read-only seat/climate information does not depend on speed/control permissions.
+        readComfortInformation()
         val token = begin() ?: return@onMain
         readConfiguration(token) { config ->
             readCurrent(token, config) { current ->
@@ -131,7 +150,6 @@ class ComfortController(
                         canRestore = parked && safe() && original != null && changedArea == config.area &&
                             matches(current, lastRequested),
                     ))
-                    readSeatPosition()
                 }
             }
         }
@@ -212,6 +230,7 @@ class ComfortController(
                     .filter { it >= bounds.minValue && it <= bounds.maxValue && it <= table.maxCelsius + .01f }
                 val choices = values.filter { it in 20f..24f }
                 if (choices.isEmpty()) { fail(token, ComfortStatus.UNAVAILABLE); return@onMain }
+                emit(state.copy(supportedCelsius = choices, zoneLabel = label(area)))
                 done(Configuration(area, values, choices))
             } }, { fail(token, ComfortStatus.UNAVAILABLE) })
         } catch (_: Exception) { fail(token, ComfortStatus.UNAVAILABLE) }
@@ -257,22 +276,86 @@ class ComfortController(
         } catch (_: Exception) { done(false) }
     }
 
-    private fun readSeatPosition() {
+    private fun readComfortInformation() {
+        inspection += 1
+        val request = inspection
         val generation = epoch
-        val api = seat ?: return
-        if (!has(PleosPermission.CAR_SEATS)) return
+        val startedAt = SystemClock.elapsedRealtime()
+        fun current() = active && request == inspection && generation == epoch &&
+            SystemClock.elapsedRealtime() - startedAt in 0L..TIMEOUT_MS
+        inspectionTimeout?.let(handler::removeCallbacks)
+        val seatAllowed = has(PleosPermission.CAR_SEATS)
+        emit(state.copy(cabinCelsius = null, climatePowerOn = null, seatPosition = null,
+            seatSupport = SeatSupport(if (seatAllowed) ComfortReadStatus.CHECKING else ComfortReadStatus.PERMISSION_REQUIRED)))
+        inspectionTimeout = Runnable {
+            if (active && request == inspection && generation == epoch && state.seatSupport.status == ComfortReadStatus.CHECKING) {
+                emit(state.copy(seatSupport = state.seatSupport.copy(status =
+                    if (state.seatSupport.backrestPositionReadable || state.seatSupport.movements.isNotEmpty()) ComfortReadStatus.AVAILABLE else ComfortReadStatus.UNAVAILABLE)))
+            }
+        }.also { handler.postDelayed(it, TIMEOUT_MS) }
+
+        // Optional reads have their own deadline and never enable climate writes.
+        hvac?.takeIf { has(PleosPermission.CAR_CLIMATE) }?.let { api ->
+            try {
+                api.checkHvacPowerCapabilities({ config, areas -> onMain {
+                    if (!current() || config.accessType !in READ_ACCESS) return@onMain
+                    val area = areas.filter { SeatValue.ROW_1_LEFT in it.values }.minByOrNull { it.values.size } ?: return@onMain
+                    try { api.getHvacPowerState(area, { power -> onMain {
+                        if (current()) emit(state.copy(climatePowerOn = power))
+                    } }, { }) } catch (_: Exception) { }
+                } }, { })
+            } catch (_: Exception) { }
+            try {
+                api.checkHvacTemperatureCurrentCapabilities({ config, areas -> onMain {
+                    if (!current() || config.accessType !in READ_ACCESS) return@onMain
+                    val area = areas.filter { SeatValue.ROW_1_LEFT in it.values }.minByOrNull { it.values.size } ?: return@onMain
+                    try { api.getHvacTemperatureCurrent(area, TemperatureUnit.CELSIUS, { value -> onMain {
+                        if (current()) emit(state.copy(cabinCelsius = value?.takeIf { it.isFinite() && it in -50f..80f }))
+                    } }, { }) } catch (_: Exception) { }
+                } }, { })
+            } catch (_: Exception) { }
+        }
+
+        val api = seat
+        if (!seatAllowed) return
+        if (api == null) { emit(state.copy(seatSupport = SeatSupport(ComfortReadStatus.UNAVAILABLE))); return }
+        val completed = mutableSetOf<String>()
+        fun complete(key: String) {
+            if (!current() || !completed.add(key)) return
+            if (completed.size == 5) {
+                emit(state.copy(seatSupport = state.seatSupport.copy(status =
+                    if (state.seatSupport.backrestPositionReadable || state.seatSupport.movements.isNotEmpty()) ComfortReadStatus.AVAILABLE else ComfortReadStatus.UNAVAILABLE)))
+            }
+        }
+        fun movement(kind: SeatAdjustment, query: ((CapabilityConfig, List<SeatArea>) -> Unit, (Exception) -> Unit) -> Unit) {
+            try {
+                query({ config, areas -> onMain {
+                    if (!current()) return@onMain
+                    val supported = config.accessType in WRITE_ACCESS && areas.any { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) }
+                    if (supported) emit(state.copy(seatSupport = state.seatSupport.copy(movements = state.seatSupport.movements + kind)))
+                    complete(kind.name)
+                } }, { onMain { complete(kind.name) } })
+            } catch (_: Exception) { complete(kind.name) }
+        }
+        movement(SeatAdjustment.BACKREST, api::checkMoveSeatBackrestAngleCapabilities)
+        movement(SeatAdjustment.FORE_AFT, api::checkMoveSeatForeAftCapabilities)
+        movement(SeatAdjustment.HEIGHT, api::checkMoveSeatHeightCapabilities)
+        movement(SeatAdjustment.TILT, api::checkMoveSeatTiltCapabilities)
         try {
             api.checkSeatBackrestAnglePositionCapabilities({ config, areas -> onMain {
-                if (!active || generation != epoch || config.accessType !in listOf(AccessType.READ, AccessType.READ_WRITE)) return@onMain
-                val area = areas.keys.firstOrNull { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) } ?: return@onMain
-                val bounds = areas[area] ?: return@onMain
-                try {
-                    api.getCurrentSeatBackrestAnglePosition(area, { position -> onMain {
-                        if (active && generation == epoch) emit(state.copy(seatPosition = position?.takeIf { it in bounds.minValue..bounds.maxValue }))
-                    } }, { })
-                } catch (_: Exception) { /* A disconnected optional seat read must not affect climate. */ }
-            } }, { })
-        } catch (_: Exception) { /* Optional read; the climate feature stays independent. */ }
+                if (!current()) return@onMain
+                val area = areas.keys.firstOrNull { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) }
+                val bounds = area?.let(areas::get)
+                if (config.accessType !in READ_ACCESS || area == null || bounds == null || bounds.minValue > bounds.maxValue) {
+                    complete("position"); return@onMain
+                }
+                emit(state.copy(seatSupport = state.seatSupport.copy(backrestPositionReadable = true)))
+                complete("position")
+                try { api.getCurrentSeatBackrestAnglePosition(area, { position -> onMain {
+                    if (current()) emit(state.copy(seatPosition = position?.takeIf { it in bounds.minValue..bounds.maxValue }))
+                } }, { }) } catch (_: Exception) { }
+            } }, { onMain { complete("position") } })
+        } catch (_: Exception) { complete("position") }
     }
 
     private fun begin(): Long? {
@@ -284,7 +367,7 @@ class ComfortController(
         operation += 1
         val token = operation
         operationStartedAt = SystemClock.elapsedRealtime()
-        emit(state.copy(busy = true, status = ComfortStatus.CHECKING, canSet = false, canRestore = false))
+        emit(state.copy(busy = true, status = ComfortStatus.CHECKING, canSet = false, canRestore = false, currentCelsius = null))
         timeout?.let(handler::removeCallbacks)
         timeout = Runnable { fail(token, ComfortStatus.UNCONFIRMED) }.also { handler.postDelayed(it, TIMEOUT_MS) }
         return token
@@ -304,13 +387,15 @@ class ComfortController(
     }
 
     private fun stopInternal() {
-        active = false; epoch += 1; operation += 1
+        active = false; epoch += 1; operation += 1; inspection += 1
         timeout?.let(handler::removeCallbacks); timeout = null
+        inspectionTimeout?.let(handler::removeCallbacks); inspectionTimeout = null
         properties = null
         runCatching { car?.disconnect() }; car = null
         runCatching { vehicle?.release() }; vehicle = null; hvac = null; seat = null
         worker?.shutdownNow(); worker = null
-        state = state.copy(busy = false, status = ComfortStatus.STOPPED, canSet = false, canRestore = false, seatPosition = null)
+        state = state.copy(busy = false, status = ComfortStatus.STOPPED, canSet = false, canRestore = false,
+            currentCelsius = null, seatPosition = null, seatSupport = SeatSupport(), cabinCelsius = null, climatePowerOn = null)
         listener = null
     }
 
@@ -321,5 +406,9 @@ class ComfortController(
     private fun emit(next: ComfortState) { state = next; listener?.invoke(next) }
     private fun onMain(block: () -> Unit) { if (Looper.myLooper() == handler.looper) block() else handler.post(block) }
 
-    private companion object { const val TIMEOUT_MS = 8_000L }
+    private companion object {
+        const val TIMEOUT_MS = 8_000L
+        val READ_ACCESS = setOf(AccessType.READ, AccessType.READ_WRITE)
+        val WRITE_ACCESS = setOf(AccessType.WRITE, AccessType.READ_WRITE)
+    }
 }

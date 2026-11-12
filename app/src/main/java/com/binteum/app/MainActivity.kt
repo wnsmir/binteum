@@ -31,6 +31,9 @@ import com.binteum.app.media.WebMediaPanel
 import com.binteum.app.vehicle.PleosVehicleDataSource
 import com.binteum.app.vehicle.ComfortController
 import com.binteum.app.nearby.*
+import com.binteum.app.music.*
+import com.binteum.app.audio.NapSoundPlayer
+import com.binteum.app.audio.NapSoundStatus
 import com.binteum.app.ui.*
 import com.binteum.core.*
 import org.json.JSONArray
@@ -119,6 +122,21 @@ class MainActivity : Activity() {
     private var nearbyResumeKind: NearbyKind? = null
     private val nearbyPlanLabels = mutableMapOf<NearbyPlace, TextView>()
     private var napDurationMinutes = 15
+    private var napWakeReserveMinutes = 3
+    private var napBrightnessPercent = 12
+    private var napSound = NapSound.OFF
+    private var napSoundVolume = 20
+    private var napWakeLabel: TextView? = null
+    private var napSoundLabel: TextView? = null
+    private var napAfterTemperature = false
+    private var napTemperatureRequest = 0L
+    private var musicEntry = UsageEntryPoint.MANUAL
+    private val musicPreferences by lazy { MusicPreferences(this) }
+    private val napSoundPlayer: NapSoundPlayer by lazy {
+        NapSoundPlayer(this, { resumed && started && tab == 5 && allowed() }) {
+            napSoundLabel?.text = napSoundStatusText()
+        }
+    }
     private var nap: NapSession? = null
     private var napChoiceId: String? = null
     private var napEntry = UsageEntryPoint.MANUAL
@@ -198,6 +216,7 @@ class MainActivity : Activity() {
             ambientBackground.setActive(resumed && safeToConfigure())
             if (demoMode && demoScenario != 4) emitDemoScenario()
             snapshot?.let(::acceptSnapshot)
+            cancelUnsafeNapTemperatureStart()
             if (!safeToConfigure()) completionVoice.stop()
             updateLabels()
             refreshMediaGate()
@@ -212,7 +231,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tab = savedInstanceState?.getInt("tab", 0) ?: 0
-        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..5 }?.takeLast(16)?.forEach(screenHistory::addLast)
+        savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..6 }?.takeLast(16)?.forEach(screenHistory::addLast)
         activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
         themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
@@ -228,6 +247,12 @@ class MainActivity : Activity() {
         usageStore = UsageStore(this)
         usageRecords = usageStore.recent()
         learningOn = prefs.getBoolean("learningOn", true)
+        napDurationMinutes = prefs.getInt("napDurationMinutes", 15).takeIf { it in listOf(5, 10, 15, 20, 30) } ?: 15
+        napWakeReserveMinutes = prefs.getInt("napWakeReserveMinutes", 3).takeIf { it in listOf(2, 3, 5) } ?: 3
+        napBrightnessPercent = prefs.getInt("napBrightnessPercent", 12).takeIf { it in listOf(5, 12, 25) } ?: 12
+        napSound = runCatching { NapSound.valueOf(prefs.getString("napSound", "OFF") ?: "OFF") }.getOrDefault(NapSound.OFF)
+        napSoundVolume = prefs.getInt("napSoundVolume", 20).takeIf { it in listOf(0, 10, 20, 35) } ?: 20
+        selectedTemperature = prefs.getFloat("napTemperature", 22f).takeIf { it.isFinite() && it in 20f..24f } ?: 22f
         demoMode = BuildConfig.DEBUG && prefs.getBoolean("demoMode", false)
         demoScenario = prefs.getInt("demoScenario", 0).coerceIn(0, 4)
         completionVoice = com.binteum.app.audio.CompletionVoice(this,
@@ -266,13 +291,23 @@ class MainActivity : Activity() {
         render()
         source.start { value -> runOnUiThread { if (started) acceptSnapshot(value) } }
         if (demoMode) emitDemoScenario()
-        comfort.start { if (started && tab == 5) render(preserveScroll = true) }
+        comfort.start { state ->
+            if (napAfterTemperature && !state.busy) {
+                napAfterTemperature = false; napTemperatureRequest++
+                if (state.status == com.binteum.app.vehicle.ComfortStatus.APPLIED && allowed() && tab == 5 && !demoMode) startNap()
+                else napNote = tx("온도 적용을 확인하지 못해 낮잠을 시작하지 않았어요. 소리·화면만으로도 시작할 수 있어요.",
+                    "The temperature change was not verified, so the nap did not start. You can still start with sound and dimming only.")
+            }
+            if (started && tab == 5) render(preserveScroll = true)
+        }
         handler.post(ticker)
     }
 
     override fun onPause() {
+        cancelNapTemperatureStart()
         if (nap != null) endNap(false, tx("화면을 벗어나 휴식을 종료했어요. 기상 알림도 중지됐어요.", "Rest ended when this screen was left. The wake cue was stopped."))
         napChime.stop()
+        napSoundPlayer.stop()
         cancelNearbyWork()
         resumed = false
         completionVoice.stop()
@@ -310,7 +345,7 @@ class MainActivity : Activity() {
         if (!goBack()) super.onBackPressed()
     }
 
-    override fun onDestroy() { nearbyClient.close(); completionVoice.stop(); ambientBackground.release(); media.release(); usageStore.close(); super.onDestroy() }
+    override fun onDestroy() { napSoundPlayer.close(); nearbyClient.close(); completionVoice.stop(); ambientBackground.release(); media.release(); usageStore.close(); super.onDestroy() }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -331,6 +366,7 @@ class MainActivity : Activity() {
         val result = if (value.observedAtMillis < sourceStartedAt) SessionResult(SessionStatus.WAITING_FOR_DATA)
             else session.update(value, System.currentTimeMillis())
         status = result.status
+        cancelUnsafeNapTemperatureStart()
         if (!allowed() && (nearbyLoading || nearbyResult != null)) {
             cancelNearbyWork()
             nearbyNote = tx("차량 상태가 바뀌어 검색을 멈췄어요. 다시 검색해 주세요.", "Vehicle status changed. Search again to refresh nearby places.")
@@ -429,7 +465,7 @@ class MainActivity : Activity() {
             (media.parent as? ViewGroup)?.removeView(media)
             media.applyPalette(palette)
             timerLabel = null; diagnosticsLabel = null; napLabel = null; nearbyPlanLabels.clear()
-            napPlanLabel = null; napStartButton = null
+            napPlanLabel = null; napStartButton = null; napWakeLabel = null; napSoundLabel = null
             window.statusBarColor = paper
             window.navigationBarColor = palette.surface
             // The same drawable survives UI rebuilds so its motion never restarts on tab/theme changes.
@@ -534,6 +570,7 @@ class MainActivity : Activity() {
         tab == 3 -> tx("활동", "Activities")
         tab == 4 -> nearbyKind?.let(::nearbyTitle) ?: tx("주변", "Nearby")
         tab == 5 -> tx("낮잠", "Nap")
+        tab == 6 -> tx("음악", "Music")
         else -> tx("대시보드", "Dashboard")
     }
 
@@ -554,6 +591,7 @@ class MainActivity : Activity() {
         addView(row().apply {
             listOf(Triple(0, tx("대시보드", "Dashboard"), AppIcon.DASHBOARD),
                 Triple(1, tx("영상", "Videos"), AppIcon.PLAY),
+                Triple(6, tx("음악", "Music"), AppIcon.MUSIC),
                 Triple(3, tx("활동", "Activities"), AppIcon.LEAF),
                 Triple(4, tx("주변", "Nearby"), AppIcon.MAP),
                 Triple(5, tx("낮잠", "Nap"), AppIcon.BED)).forEach { (destination, title, glyph) ->
@@ -687,6 +725,7 @@ class MainActivity : Activity() {
             tab == 3 -> buildActivities(this)
             tab == 4 -> buildNearby(this)
             tab == 5 -> buildNap(this)
+            tab == 6 -> buildMusic(this)
             else -> buildRecommendations(this)
         }
     }
@@ -782,9 +821,11 @@ class MainActivity : Activity() {
 
     private fun navigateTo(destination: Int, remember: Boolean = true) {
         if (tab == destination) return
+        cancelNapTemperatureStart()
         if (tab == 4) { cancelNearbyWork(); nearbyResumeKind = null }
         if (nap != null) endNap(false, tx("다른 화면으로 이동해 휴식을 마쳤어요", "Rest ended when you changed screens"))
         napChime.stop()
+        napSoundPlayer.stop()
         screenScrolls[tab] = (leftScroll?.scrollY ?: 0) to (contentScroll?.scrollY ?: 0)
         if (remember) {
             screenHistory.addLast(tab)
@@ -793,7 +834,7 @@ class MainActivity : Activity() {
         media.pauseForHost()
         leaveActivityScreen()
         pendingVideoEntry = UsageEntryPoint.MANUAL
-        napEntry = UsageEntryPoint.MANUAL; nearbyEntry = UsageEntryPoint.MANUAL
+        napEntry = UsageEntryPoint.MANUAL; nearbyEntry = UsageEntryPoint.MANUAL; musicEntry = UsageEntryPoint.MANUAL
         tab = destination
         pendingScrollRestore = screenScrolls[destination] ?: (0 to 0)
         render()
@@ -829,6 +870,7 @@ class MainActivity : Activity() {
         UsageCategory.FOOD -> tx("주변 먹거리", "Nearby food")
         UsageCategory.WALK -> tx("산책", "Walk")
         UsageCategory.NAP -> tx("낮잠", "Nap")
+        UsageCategory.MUSIC -> tx("음악", "Music")
     }
     private fun ownTitle(activity: OwnActivity): String = if (resources.configuration.locales[0].language != "en") activity.title else when (activity.id) {
         "rest_3" -> "3-minute eye break"; "reflection_5" -> "5-minute reflection"; "quiz_8" -> "8-minute quiz"
@@ -880,15 +922,27 @@ class MainActivity : Activity() {
             val available = (ActivityCatalog.all + ActivityCatalog.guided).filter { it.durationSeconds + 120 <= budget }
                 .sortedByDescending { feedback[it.id]?.preference ?: .5 }
             val videos = VideoCatalog.recommend(budget)
-            val categories = (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) + available.map { category(it.kind) }.distinct() +
+            val categories = listOf(UsageCategory.MUSIC) + (if (videos.isNotEmpty()) listOf(UsageCategory.VIDEO) else emptyList()) + available.map { category(it.kind) }.distinct() +
                 (if (budget >= 420) listOf(UsageCategory.NAP) else emptyList()) +
                 (if (budget >= 1200) listOf(UsageCategory.FOOD, UsageCategory.WALK) else emptyList())
-            val ranked = if (learningOn) UsagePreferences.rank(usageRecords, chargeEstimate().seconds, snapshot?.stateOfCharge, categories) else categories
+            val defaultOrder = when {
+                budget >= 1800 -> listOf(UsageCategory.WALK, UsageCategory.FOOD, UsageCategory.MUSIC, UsageCategory.NAP, UsageCategory.VIDEO)
+                budget >= 900 -> listOf(UsageCategory.MUSIC, UsageCategory.NAP, UsageCategory.VIDEO, UsageCategory.FOOD, UsageCategory.WALK)
+                else -> listOf(UsageCategory.MUSIC, UsageCategory.VIDEO, UsageCategory.REST)
+            }
+            val ordered = categories.sortedBy { defaultOrder.indexOf(it).takeIf { index -> index >= 0 } ?: defaultOrder.size }
+            val ranked = if (learningOn) UsagePreferences.rank(usageRecords, chargeEstimate().seconds, snapshot?.stateOfCharge, ordered) else ordered
             ranked.take(3).forEach { kind ->
                 val count = UsagePreferences.matchingChoices(usageRecords, kind, chargeEstimate().seconds)
                 val reason = if (learningOn && count >= 2) tx("비슷한 남은 시간에 ${count}번 선택했어요", "Chosen $count times with similar time remaining")
                     else tx("충전량과 남은 시간에 맞는 활동", "Fits your charge level and remaining time")
-                if (kind == UsageCategory.VIDEO) {
+                if (kind == UsageCategory.MUSIC) {
+                    val mood = MusicCatalog.recommend(budget).first()
+                    cards.addView(choiceCard(tx("음악과 함께 쉬기", "Rest with music"),
+                        "${mood.title(isEnglish())} · $reason", AppIcon.MUSIC) {
+                        navigateTo(6); musicEntry = UsageEntryPoint.RECOMMENDED
+                    })
+                } else if (kind == UsageCategory.VIDEO) {
                     val sample = videos.first()
                     cards.addView(choiceCard(tx("짧은 영상 · ${sample.seconds / 60}분", "Short video · ${sample.seconds / 60} min"),
                         "${sample.title} · $reason", AppIcon.PLAY) {
@@ -902,8 +956,9 @@ class MainActivity : Activity() {
                         navigateTo(5); napEntry = UsageEntryPoint.RECOMMENDED
                     })
                 } else if (kind == UsageCategory.FOOD || kind == UsageCategory.WALK) {
-                    cards.addView(choiceCard(categoryTitle(kind), tx("지도에서 왕복시간부터 확인해 보세요", "Check both walking times on the map first"), if (kind == UsageCategory.WALK) AppIcon.LEAF else AppIcon.COFFEE) {
+                    cards.addView(choiceCard(categoryTitle(kind), tx("차량 현재 위치로 장소와 왕복시간을 바로 찾아요", "Find places and round-trip times from your vehicle"), if (kind == UsageCategory.WALK) AppIcon.LEAF else AppIcon.COFFEE) {
                         navigateTo(4); nearbyEntry = UsageEntryPoint.RECOMMENDED
+                        requestNearby(if (kind == UsageCategory.WALK) NearbyKind.PARK else if (budget < 1800) NearbyKind.CONVENIENCE else NearbyKind.CAFE)
                     })
                 } else {
                     val activity = available.first { category(it.kind) == kind }
@@ -933,6 +988,73 @@ class MainActivity : Activity() {
         parent.addView(media)
         addCardGrid(parent).addView(choiceCard("Netflix", tx("외부 앱 또는 웹으로 열어요. 로그인·멤버십·기기 지원이 필요하며, 외부 재생은 이 앱에서 제어할 수 없어요.",
             "Opens an external app or browser. Login, membership and device support are required; playback is outside this app's control."), AppIcon.PLAY) { openNetflix() })
+    }
+
+    private fun isEnglish() = resources.configuration.locales[0].language == "en"
+
+    private fun buildMusic(parent: LinearLayout) {
+        parent.addView(label(tx("이 틈에, 좋아하는 음악", "Your music, your moment"), 32f, true))
+        parent.addView(label(MusicCatalog.windowLabel(recommendationSeconds(), isEnglish()), 23f).apply { setTextColor(muted) })
+        val provider = musicPreferences.provider
+        val services = addCardGrid(parent, 220, 340, 3)
+        MusicProvider.entries.forEach { item ->
+            val card = surfaceCard()
+            card.addView(sectionTitle(item.displayName, AppIcon.MUSIC))
+            card.addView(button(if (item == provider) tx("기본 서비스 ✓", "Default service ✓") else tx("기본으로 선택", "Use by default"), item == provider) {
+                musicPreferences.provider = item; render(preserveScroll = true)
+            })
+            card.addView(button(tx("서비스 열기 · 로그인", "Open service · sign in")) { openMusic(item, null, UsageEntryPoint.MANUAL) })
+            services.addView(card)
+        }
+        parent.addView(label(tx("처음에는 공식 앱·브라우저에서 로그인하세요. 다음에도 같은 서비스의 로그인 상태를 사용하며, 만료되면 다시 로그인할 수 있어요.",
+            "Sign in through the official app or browser. Its session is reused and may need renewal when it expires."), 19f).apply { setTextColor(muted) })
+        parent.addView(sectionTitle(tx("남은 여유에 어울리는 음악", "Music for this charging break"), AppIcon.SPARKLES))
+        val recommendations = MusicCatalog.recommend(recommendationSeconds())
+        val cards = addCardGrid(parent)
+        recommendations.forEach { mood ->
+            cards.addView(choiceCard(mood.title(isEnglish()), "${mood.description(isEnglish())}\n${provider.displayName}", AppIcon.MUSIC) {
+                openMusic(provider, mood, musicEntry)
+            })
+        }
+        parent.addView(button(tx("다른 분위기 고르기", "Choose another mood")) {
+            val moods = MusicCatalog.all
+            chooseSetting(tx("듣고 싶은 분위기", "Choose a mood"), moods.map { it.title(isEnglish()) }, -1) {
+                openMusic(musicPreferences.provider, moods[it], UsageEntryPoint.MANUAL)
+            }
+        })
+        parent.addView(label(tx("분위기를 추천하고 서비스에서 곡을 골라요. 곡 길이·구독·재생은 서비스에 따라 달라지며, 외부 음악은 충전 종료 시 자동으로 멈추지 않아요.",
+            "Choose songs in the service. Track length, membership and playback vary; external music is not stopped automatically when charging ends."), 19f).apply { setTextColor(muted) })
+    }
+
+    private fun openMusic(provider: MusicProvider, mood: MusicMood?, entry: UsageEntryPoint) {
+        if (!allowed()) return
+        media.pauseForHost(); napChime.stop(); napSoundPlayer.stop(); completionVoice.stop()
+        val result = MusicLauncher(this) { allowed() }.open(provider, mood)
+        if (result.opened) recordChoice(UsageCategory.MUSIC, entry)
+        else if (result == MusicOpenResult.NO_HANDLER) {
+            recordChoice(UsageCategory.MUSIC, entry)
+            showMusicHandoff(provider, mood)
+        }
+        musicEntry = UsageEntryPoint.MANUAL
+    }
+
+    private fun showMusicHandoff(provider: MusicProvider, mood: MusicMood?) {
+        if (!allowed()) return
+        val uri = mood?.let { MusicLinks.search(provider, it) } ?: MusicLinks.home(provider)
+        val content = column().apply { setPadding(dp(24), dp(16), dp(24), dp(16)) }
+        content.addView(label(tx("이 차량에는 서비스를 여는 앱·브라우저가 없어요. 휴대폰으로 이어서 열 수 있어요.",
+            "No compatible app or browser is installed here. Continue on your phone."), 22f))
+        val bitmap = runCatching {
+            val bits = com.google.zxing.qrcode.QRCodeWriter().encode(uri.toString(), com.google.zxing.BarcodeFormat.QR_CODE, 480, 480,
+                mapOf(com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8", com.google.zxing.EncodeHintType.MARGIN to 4))
+            android.graphics.Bitmap.createBitmap(IntArray(480 * 480) { if (bits[it % 480, it / 480]) android.graphics.Color.BLACK else android.graphics.Color.WHITE },
+                480, 480, android.graphics.Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+        bitmap?.let { content.addView(ImageView(this).apply { setImageBitmap(it); contentDescription = tx("음악 서비스 QR", "Music service QR") },
+            LinearLayout.LayoutParams(dp(250), dp(250)).apply { gravity = Gravity.CENTER_HORIZONTAL }) }
+        content.addView(label(uri.toString(), 17f))
+        transientDialog = AlertDialog.Builder(this, dialogTheme()).setTitle(provider.displayName).setView(content)
+            .setPositiveButton(tx("닫기", "Close"), null).show()
     }
 
     private fun nearbyTitle(kind: NearbyKind) = when (kind) {
@@ -1162,36 +1284,52 @@ class MainActivity : Activity() {
         val current = nap
         if (current != null) {
             napLabel = label(clock(napRemainingSeconds), 64f, true).also { rest.addView(it) }
+            napWakeLabel = label(napWakeTimeText(), 23f, true).also { rest.addView(it) }
             rest.addView(label(tx("화면 밝기를 낮췄어요. 충전 여유가 줄면 먼저 깨워드려요.", "The screen is dimmed. A shorter charge window brings the wake cue forward."), 22f))
             rest.addView(button(tx("일어났어요 · 휴식 마치기", "I'm awake · end rest"), true) { endNap(false, tx("휴식을 마쳤어요", "Rest ended")); render(preserveScroll = true) })
         } else {
-            rest.addView(button(tx("휴식 ${napDurationMinutes}분 ▾", "$napDurationMinutes-minute rest ▾")) {
-                chooseSetting(tx("휴식 길이", "Rest duration"), listOf("5 min", "10 min", "15 min", "20 min"), listOf(5, 10, 15, 20).indexOf(napDurationMinutes)) {
-                    napDurationMinutes = listOf(5, 10, 15, 20)[it]; render(preserveScroll = true)
+            rest.addView(button(tx("휴식 ${napDurationMinutes}분 ▾", "$napDurationMinutes-minute rest ▾"), enabled = !napAfterTemperature && !comfort.state.busy) {
+                val minutes = listOf(5, 10, 15, 20, 30)
+                chooseSetting(tx("휴식 길이", "Rest duration"), minutes.map { tx("${it}분", "$it min") }, minutes.indexOf(napDurationMinutes)) {
+                    napDurationMinutes = minutes[it]; saveNapPreferences(); render(preserveScroll = true)
                 }
             })
             napPlanLabel = label("", 22f).also { rest.addView(it) }
-            rest.addView(button(tx("기상음 미리 듣기", "Preview wake sound")) { if (allowed() && !napChime.play(true)) toast(tx("기상음을 재생하지 못했어요. 알람 볼륨을 확인하세요.", "Could not play the wake cue. Check alarm volume.")) })
+            rest.addView(button(tx("기상음 미리 듣기", "Preview wake sound")) {
+                napSoundPlayer.stop()
+                if (allowed() && !napChime.play(true)) toast(tx("기상음을 재생하지 못했어요. 알람 볼륨을 확인하세요.", "Could not play the wake cue. Check alarm volume."))
+            })
             napStartButton = button(tx("낮잠 시작", "Start nap"), true) { startNap() }.also { rest.addView(it) }
         }
         rest.addView(label(tx("이 화면이 열려 있는 동안 기상음을 울려요. 화면을 벗어나면 휴식과 알림이 종료돼요.", "The wake cue works while this screen stays open. Leaving ends the rest and cue."), 18f).apply { setTextColor(muted) })
         if (napNote.isNotBlank()) rest.addView(label(napNote, 22f, true))
         rest.addView(button(tx("기상음 끄기", "Silence wake sound")) { napChime.stop() })
         cards.addView(rest)
+        buildNapSound(cards)
+        buildNapSettings(cards)
         val climate = surfaceCard()
         climate.addView(sectionTitle(tx("편안한 실내", "Cabin comfort"), AppIcon.SUN))
         val state = comfort.state
         climate.addView(label(if (demoMode) tx("시연 모드 · 실제 차량을 제어하지 않아요", "Demo mode · no vehicle controls") else comfortStatusText(), 20f))
-        state.currentCelsius?.let { climate.addView(label(tx("${state.zoneLabel.orEmpty()} · 현재 설정 ${it}°C", "${state.zoneLabel.orEmpty()} · set to ${it}°C"), 23f, true)) }
+        if (!demoMode) {
+            state.cabinCelsius?.let { climate.addView(label(tx("현재 실내 ${it}°C", "Cabin temperature ${it}°C"), 26f, true)) }
+            state.climatePowerOn?.let { climate.addView(label(if (it) tx("공조 켜짐", "Climate on") else tx("공조 꺼짐 · 차량에서 켜 주세요", "Climate off · switch it on in the vehicle"), 19f)) }
+            state.currentCelsius?.let { climate.addView(label(tx("${state.zoneLabel.orEmpty()} · 설정 온도 ${it}°C", "${state.zoneLabel.orEmpty()} · setpoint ${it}°C"), 23f, true)) }
+        }
         if (state.supportedCelsius.isNotEmpty()) {
             if (selectedTemperature !in state.supportedCelsius) selectedTemperature = state.supportedCelsius.minBy { abs(it - 22f) }
-            climate.addView(button(tx("원하는 온도 ${selectedTemperature}°C ▾", "Preferred temperature ${selectedTemperature}°C ▾"), enabled = !demoMode && nap == null) {
+            climate.addView(button(tx("원하는 온도 ${selectedTemperature}°C ▾", "Preferred temperature ${selectedTemperature}°C ▾"), enabled = !demoMode && nap == null && !state.busy && !napAfterTemperature) {
                 chooseSetting(tx("원하는 온도", "Preferred temperature"), state.supportedCelsius.map { "$it°C" }, state.supportedCelsius.indexOf(selectedTemperature)) {
-                    selectedTemperature = state.supportedCelsius[it]; render(preserveScroll = true)
+                    selectedTemperature = state.supportedCelsius[it]; prefs.edit().putFloat("napTemperature", selectedTemperature).apply(); render(preserveScroll = true)
                 }
             })
         }
         climate.addView(button(tx("선택한 온도 적용", "Apply temperature"), enabled = !demoMode && state.canSet && !state.busy && nap == null) { comfort.setTemperature(selectedTemperature) })
+        climate.addView(button(tx("온도 적용 후 낮잠 시작", "Apply temperature and start nap"), true,
+            enabled = !demoMode && allowed() && state.canSet && !state.busy && nap == null &&
+                NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime(), napWakeReserveMinutes * 60) != null) {
+            startNapWithTemperature()
+        })
         climate.addView(button(tx("변경 전 온도로 복원", "Restore previous temperature"), enabled = !demoMode && state.canRestore && !state.busy && nap == null) { comfort.restoreTemperature() })
         climate.addView(button(tx("차량 지원 상태 확인", "Check vehicle support"), enabled = !demoMode && !state.busy && nap == null) {
             if (safeToConfigure()) {
@@ -1202,10 +1340,119 @@ class MainActivity : Activity() {
         climate.addView(label(tx("주차 P·정지 상태에서 지원되는 공조 구역에 적용해요. 공조 전원은 차량에서 켜 주세요. 종료 시 온도는 자동 복원하지 않아요.",
             "Applies to the supported climate zone only while parked in P. Switch climate power on in the vehicle. Ending rest does not restore temperature automatically."), 18f).apply { setTextColor(muted) })
         climate.addView(sectionTitle(tx("편안한 자세", "Get comfortable"), AppIcon.BED))
-        climate.addView(label(tx("시트는 차량 버튼으로 편안한 자세에 맞춰 주세요. 시트 자동 조절은 지원하지 않아요.",
-            "Adjust the seat with the vehicle controls. Automatic seat adjustment is unavailable."), 20f))
+        climate.addView(label(seatSupportText(), 20f))
+        climate.addView(label(tx("자세는 차량 시트 버튼으로 맞춰 주세요. 앱의 자동 젖힘·원위치 복원은 아직 사용할 수 없어요.",
+            "Adjust your posture with the vehicle's seat buttons. Automatic recline and seat restoration are not available in this app yet."), 18f).apply { setTextColor(muted) })
         cards.addView(climate)
         updateNapPlan()
+    }
+
+    private fun buildNapSound(cards: ViewGroup) {
+        val sound = surfaceCard()
+        sound.addView(sectionTitle(tx("잠드는 소리", "Rest sounds"), AppIcon.SOUND))
+        sound.addView(label(tx("인터넷 없이, 부드럽게 이어져요", "A soft, offline soundscape"), 20f))
+        sound.addView(button("${napSoundTitle(napSound)} ▾") {
+            val choices = NapSound.entries
+            chooseSetting(tx("배경 소리", "Background sound"), choices.map(::napSoundTitle), napSound.ordinal) {
+                napSound = choices[it]; saveNapPreferences()
+                napSoundPlayer.stop()
+                if (nap != null) { napChime.stop(); napSoundPlayer.play(napSound, napSoundVolume) }
+                render(preserveScroll = true)
+            }
+        })
+        sound.addView(label(when (napSound) {
+            NapSound.WHITE -> tx("고른 ‘쉬—’ 소리", "An even, airy hiss")
+            NapSound.PINK -> tx("고음이 덜한, 부드러운 소리", "A softer sound with less high-frequency energy")
+            NapSound.BROWN -> tx("낮고 묵직하게 깔리는 소리", "A deeper, low-pitched sound")
+            NapSound.OFF -> tx("소리 없이 조용히 쉬어요", "Rest quietly without background sound")
+        }, 20f))
+        sound.addView(button(tx("배경음 크기 ${napSoundVolume}% ▾", "Sound level ${napSoundVolume}% ▾")) {
+            val volumes = listOf(0, 10, 20, 35)
+            chooseSetting(tx("배경음 크기", "Sound level"), volumes.map { if (it == 0) tx("음소거", "Mute") else "$it%" }, volumes.indexOf(napSoundVolume)) {
+                napSoundVolume = volumes[it]; saveNapPreferences(); napSoundPlayer.setVolume(napSoundVolume)
+                render(preserveScroll = true)
+            }
+        })
+        napSoundLabel = label(napSoundStatusText(), 18f).apply { setTextColor(muted) }.also { sound.addView(it) }
+        sound.addView(button(if (nap == null) tx("8초 미리 듣기", "Preview for 8 seconds") else tx("배경 소리 켜기", "Start rest sound"),
+            enabled = allowed() && napSound != NapSound.OFF && napSoundVolume > 0) {
+            media.pauseForHost(); completionVoice.stop(); napChime.stop()
+            napSoundPlayer.play(napSound, napSoundVolume, preview = nap == null)
+        })
+        sound.addView(button(tx("배경 소리 끄기", "Stop rest sound")) { napSoundPlayer.stop(immediate = false) })
+        cards.addView(sound)
+    }
+
+    private fun buildNapSettings(cards: ViewGroup) {
+        val settings = surfaceCard()
+        settings.addView(sectionTitle(tx("나의 기상 준비", "Wake-up preferences"), AppIcon.CLOCK))
+        settings.addView(button(tx("기상 여유 ${napWakeReserveMinutes}분 ▾", "Wake buffer $napWakeReserveMinutes min ▾"), enabled = nap == null && !napAfterTemperature && !comfort.state.busy) {
+            val choices = listOf(2, 3, 5)
+            chooseSetting(tx("일어나 준비할 시간", "Time to get ready"), choices.map { tx("${it}분", "$it min") }, choices.indexOf(napWakeReserveMinutes)) {
+                napWakeReserveMinutes = choices[it]; saveNapPreferences(); render(preserveScroll = true)
+            }
+        })
+        settings.addView(button(tx("휴식 화면 밝기 ${napBrightnessPercent}% ▾", "Rest screen brightness $napBrightnessPercent% ▾")) {
+            val choices = listOf(5, 12, 25)
+            chooseSetting(tx("휴식 중 밝기", "Brightness during rest"), choices.map { "$it%" }, choices.indexOf(napBrightnessPercent)) {
+                napBrightnessPercent = choices[it]; saveNapPreferences()
+                if (nap != null) window.attributes = window.attributes.apply { screenBrightness = napBrightnessPercent / 100f }
+                render(preserveScroll = true)
+            }
+        })
+        settings.addView(label(tx("선택한 소리·밝기·기상 여유를 기억해요. 소리는 ‘낮잠 시작’이나 미리 듣기를 눌렀을 때만 켜져요.",
+            "Your sound, brightness and wake buffer are saved. Sound starts only when you start a nap or preview it."), 19f))
+        settings.addView(label(tx("끝나면 배경음을 멈추고 화면 밝기를 돌려놓아요. 온도 복원은 아래 버튼에서 직접 선택해 주세요.",
+            "At the end, background sound stops and brightness returns. Restore the climate temperature using its button."), 19f).apply { setTextColor(muted) })
+        cards.addView(settings)
+    }
+
+    private fun saveNapPreferences() {
+        prefs.edit().putInt("napDurationMinutes", napDurationMinutes).putInt("napWakeReserveMinutes", napWakeReserveMinutes)
+            .putInt("napBrightnessPercent", napBrightnessPercent).putString("napSound", napSound.name)
+            .putInt("napSoundVolume", napSoundVolume).apply()
+    }
+
+    private fun napSoundTitle(sound: NapSound) = when (sound) {
+        NapSound.OFF -> tx("소리 없음", "No sound")
+        NapSound.WHITE -> tx("화이트 노이즈", "White noise")
+        NapSound.PINK -> tx("핑크 노이즈", "Pink noise")
+        NapSound.BROWN -> tx("브라운 노이즈", "Brown noise")
+    }
+
+    private fun napSoundStatusText(): String = when (napSoundPlayer.state.status) {
+        NapSoundStatus.STARTING -> tx("소리를 준비하고 있어요", "Preparing sound")
+        NapSoundStatus.PLAYING -> tx("${napSoundTitle(napSoundPlayer.state.sound)} 재생 중", "${napSoundTitle(napSoundPlayer.state.sound)} playing")
+        NapSoundStatus.MUTED -> tx("배경음 음소거", "Background sound muted")
+        NapSoundStatus.FOCUS_LOST -> tx("다른 소리가 시작되어 멈췄어요. 다시 켤 수 있어요.", "Stopped for other audio. You can start it again.")
+        NapSoundStatus.FOCUS_UNAVAILABLE -> tx("다른 앱이 소리를 사용하고 있어요", "Another app is using audio")
+        NapSoundStatus.UNAVAILABLE -> tx("소리 출력을 확인하지 못했어요", "Sound output is unavailable")
+        else -> tx("배경 소리 꺼짐", "Background sound off")
+    }
+
+    private fun napWakeTimeText(): String {
+        val time = android.text.format.DateFormat.getTimeFormat(this).format(java.util.Date(System.currentTimeMillis() + napRemainingSeconds * 1000L))
+        return tx("기상 예정 $time · 여유 ${napWakeReserveMinutes}분", "Wake around $time · $napWakeReserveMinutes-min buffer")
+    }
+
+    private fun seatSupportText(): String {
+        if (demoMode) return tx("시연 중에는 시트를 조절하지 않아요", "Seat controls are not used in demo mode")
+        val support = comfort.state.seatSupport
+        return when (support.status) {
+            com.binteum.app.vehicle.ComfortReadStatus.CHECKING -> tx("시트 지원 상태 확인 중", "Checking seat support")
+            com.binteum.app.vehicle.ComfortReadStatus.PERMISSION_REQUIRED -> tx("시트 지원을 읽을 권한이 없어요", "Seat capability permission is unavailable")
+            com.binteum.app.vehicle.ComfortReadStatus.AVAILABLE -> {
+                val names = support.movements.map { when (it) {
+                    com.binteum.app.vehicle.SeatAdjustment.BACKREST -> tx("등받이", "backrest")
+                    com.binteum.app.vehicle.SeatAdjustment.FORE_AFT -> tx("앞뒤", "fore/aft")
+                    com.binteum.app.vehicle.SeatAdjustment.HEIGHT -> tx("높이", "height")
+                    com.binteum.app.vehicle.SeatAdjustment.TILT -> tx("방석 기울기", "cushion tilt")
+                } }.joinToString(" · ")
+                if (names.isBlank()) tx("앱에서 확인된 시트 이동 기능이 없어요", "No seat movement capability was reported")
+                else tx("차량이 제공한 기능: $names", "Vehicle-reported support: $names")
+            }
+            else -> tx("차량 지원 상태 확인을 눌러 확인해 주세요", "Use Check vehicle support to inspect the seat")
+        }
     }
 
     private fun comfortStatusText(): String = tx(when (comfort.state.status) {
@@ -1231,15 +1478,41 @@ class MainActivity : Activity() {
     })
 
     private fun startNap() {
-        if (!allowed() || nap != null || comfort.state.busy) return
-        val next = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime()) ?: return
-        media.pauseForHost(); completionVoice.stop(); napChime.stop()
+        if (!allowed() || nap != null || comfort.state.busy || napAfterTemperature) return
+        val next = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime(), napWakeReserveMinutes * 60) ?: return
+        media.pauseForHost(); completionVoice.stop(); napChime.stop(); napSoundPlayer.stop()
         napChoiceId = recordChoice(UsageCategory.NAP, napEntry); napEntry = UsageEntryPoint.MANUAL
         nap = next; napRemainingSeconds = next.plannedDurationSeconds; napNote = ""
         beforeNapBrightness = window.attributes.screenBrightness
-        window.attributes = window.attributes.apply { screenBrightness = .12f }
+        window.attributes = window.attributes.apply { screenBrightness = napBrightnessPercent / 100f }
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        napSoundPlayer.play(napSound, napSoundVolume)
         render(preserveScroll = true)
+    }
+
+    private fun startNapWithTemperature() {
+        if (!allowed() || demoMode || nap != null || !comfort.state.canSet || comfort.state.busy) return
+        if (NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime(), napWakeReserveMinutes * 60) == null) return
+        val request = ++napTemperatureRequest
+        napAfterTemperature = true
+        napNote = tx("선택한 온도가 확인되면 낮잠을 시작해요.", "The nap starts after the chosen temperature is verified.")
+        comfort.setTemperature(selectedTemperature)
+        handler.postDelayed({
+            if (napAfterTemperature && request == napTemperatureRequest) {
+                cancelNapTemperatureStart()
+                napNote = tx("온도 확인이 지연되어 낮잠을 시작하지 않았어요.", "Temperature verification timed out; the nap was not started.")
+                if (started && resumed && tab == 5) render(preserveScroll = true)
+            }
+        }, 12_000)
+    }
+
+    private fun cancelNapTemperatureStart() { napAfterTemperature = false; napTemperatureRequest++ }
+
+    private fun cancelUnsafeNapTemperatureStart() {
+        if (napAfterTemperature && !allowed()) {
+            cancelNapTemperatureStart()
+            napNote = tx("충전·차량 상태가 바뀌어 낮잠 시작을 취소했어요.", "Nap start cancelled because the charging or vehicle state changed.")
+        }
     }
 
     private fun tickNap() {
@@ -1248,6 +1521,7 @@ class MainActivity : Activity() {
         val progress = current.tick(SystemClock.elapsedRealtime(), if (allowed()) recommendationSeconds() else null)
         napRemainingSeconds = progress.remainingSeconds
         napLabel?.text = clock(progress.remainingSeconds)
+        napWakeLabel?.text = napWakeTimeText()
         if (progress.finished) {
             val completedNormally = progress.finishReason == NapFinishReason.REQUESTED_DURATION_COMPLETE || progress.finishReason == NapFinishReason.CHARGE_WINDOW_ENDING
             endNap(completedNormally, if (completedNormally) tx("일어날 시간이에요. 차량 상태를 확인해 주세요.", "Time to wake up. Check your vehicle.")
@@ -1259,6 +1533,7 @@ class MainActivity : Activity() {
 
     private fun endNap(finished: Boolean, note: String, elapsed: Int? = null) {
         val current = nap ?: return
+        napSoundPlayer.stop()
         val duration = elapsed ?: current.cancel(SystemClock.elapsedRealtime()).elapsedSeconds
         napChoiceId?.let { id -> usageRecords.firstOrNull { it.id == id }?.let { event ->
             val updated = event.copy(durationSeconds = duration, completed = finished)
@@ -1273,10 +1548,10 @@ class MainActivity : Activity() {
 
     private fun updateNapPlan() {
         if (nap != null) return
-        val planned = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime())
-        napPlanLabel?.text = if (planned == null) tx("남은 여유가 2분을 넘어야 해요. 충전 예상시간이나 출발 시각을 확인해 주세요.",
-            "More than 2 minutes are needed. Check the charge estimate or departure time.")
-            else tx("지금은 최대 ${(planned.plannedDurationSeconds + 59) / 60}분 휴식 · 기상 여유 2분", "Up to ${(planned.plannedDurationSeconds + 59) / 60} min now · 2-minute wake buffer")
+        val planned = NapSession.start(napDurationMinutes * 60, recommendationSeconds(), SystemClock.elapsedRealtime(), napWakeReserveMinutes * 60)
+        napPlanLabel?.text = if (planned == null) tx("남은 여유가 ${napWakeReserveMinutes}분을 넘어야 해요. 충전 예상시간이나 출발 시각을 확인해 주세요.",
+            "More than $napWakeReserveMinutes minutes are needed. Check the charge estimate or departure time.")
+            else tx("지금은 최대 ${(planned.plannedDurationSeconds + 59) / 60}분 휴식 · 기상 여유 ${napWakeReserveMinutes}분", "Up to ${(planned.plannedDurationSeconds + 59) / 60} min now · $napWakeReserveMinutes-minute wake buffer")
         napStartButton?.isEnabled = planned != null && allowed() && !comfort.state.busy
     }
 
@@ -1463,8 +1738,8 @@ class MainActivity : Activity() {
         history.addView(sectionTitle(tx("선택 기록과 추천", "Choice history and recommendations"), AppIcon.SPARKLES))
         history.addView(label(tx("활동을 선택할 때마다 남은 충전시간·예측 출처·충전량·목표·직접/추천 선택을 이 기기에 저장해요. 자체 활동은 마침·중단도 기록해요.",
             "Every choice saves remaining charging time, its source, battery level, goal and direct/recommended entry on this device. App-owned activities also record completion or interruption."), 21f))
-        history.addView(label(tx("세부 영상 제목·시청 이력은 저장하지 않아요. 시연 기록은 실제 선호도 학습에서 제외해요.",
-            "Video titles and viewing history are not stored. Demo choices do not train your preferences."), 19f).apply { setTextColor(muted) })
+        history.addView(label(tx("영상·음악의 제목이나 재생 이력은 저장하지 않아요. 음악 서비스 열기는 재생 완료로 기록하지 않아요. 시연 기록은 실제 선호도 학습에서 제외해요.",
+            "Video and music titles or playback history are not stored. Opening music does not record playback completion. Demo choices do not train preferences."), 19f).apply { setTextColor(muted) })
         history.addView(settingSwitch(tx("기록으로 추천 순서 맞추기", "Personalize recommendation order"),
             tx("선택 기록은 계속 저장되며, 이 설정은 추천에 사용하는지만 바꿔요.", "Choices keep being saved; this controls whether they affect recommendations."), learningOn) {
             learningOn = it; prefs.edit().putBoolean("learningOn", it).apply()
@@ -1665,7 +1940,9 @@ class MainActivity : Activity() {
 
     private fun switchSource() {
         if (!BuildConfig.DEBUG) return
+        cancelNapTemperatureStart()
         if (nap != null) endNap(false, tx("데이터 모드가 바뀌어 휴식을 마쳤어요", "Rest ended after changing the data mode"))
+        napSoundPlayer.stop(); napChime.stop()
         cancelNearbyWork(); nearbyResumeKind = null
         media.pauseForHost(); interruptActivity(getString(com.binteum.app.R.string.ui_text_117))
         recovery = null; completed = null; source.stop()

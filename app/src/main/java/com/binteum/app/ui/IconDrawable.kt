@@ -10,7 +10,7 @@ import android.graphics.drawable.Drawable
 
 enum class AppIcon {
     DASHBOARD, PLAY, SETTINGS, SUN, MOON, SYSTEM, BATTERY, CLOCK, LEAF, SPARKLES,
-    QUIZ, ARROW_RIGHT, BACK, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT, MAP, COFFEE, BED,
+    QUIZ, ARROW_RIGHT, BACK, CHECK, CLOSE, RESET, PAUSE, SHIELD, INFO, CHEVRON_RIGHT, MAP, COFFEE, BED, MUSIC, SOUND,
 }
 
 /** Original outline symbols on a shared 24-unit grid; no font or external asset. */
@@ -42,6 +42,16 @@ class IconDrawable(private val icon: AppIcon, color: Int, private val sizePx: In
             paint.style = Paint.Style.STROKE
         }
         when (icon) {
+            AppIcon.MUSIC -> {
+                path { moveTo(9f, 17f); lineTo(9f, 5f); lineTo(20f, 3f); lineTo(20f, 15f) }
+                line(9f, 9f, 20f, 7f)
+                canvas.drawOval(3f, 15f, 9f, 20f, paint)
+                canvas.drawOval(14f, 13f, 20f, 18f, paint)
+            }
+            AppIcon.SOUND -> {
+                line(3f, 10f, 3f, 14f); line(7f, 6f, 7f, 18f); line(11f, 3f, 11f, 21f)
+                line(15f, 8f, 15f, 16f); line(19f, 5f, 19f, 19f); line(23f, 10f, 23f, 14f)
+            }
             AppIcon.MAP -> {
                 path { moveTo(3f, 5f); lineTo(9f, 3f); lineTo(15f, 5f); lineTo(21f, 3f); lineTo(21f, 19f); lineTo(15f, 21f); lineTo(9f, 19f); lineTo(3f, 21f); close() }
                 line(9f, 3f, 9f, 19f); line(15f, 5f, 15f, 21f)

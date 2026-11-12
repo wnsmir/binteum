@@ -39,7 +39,7 @@ class UsagePreferencesTest {
     }
 
     @Test fun `provider choices never retain playback durations or inferred completions`() {
-        for (category in listOf(UsageCategory.VIDEO, UsageCategory.EXTERNAL_MEDIA, UsageCategory.FOOD, UsageCategory.WALK)) {
+        for (category in listOf(UsageCategory.VIDEO, UsageCategory.EXTERNAL_MEDIA, UsageCategory.FOOD, UsageCategory.WALK, UsageCategory.MUSIC)) {
             val saved = UsagePreferences.record(emptyList(), event("1", category).copy(durationSeconds = 600, completed = true, rating = ActivityRating.LIKE)).single()
             assertNull(saved.durationSeconds)
             assertNull(saved.completed)
@@ -64,6 +64,13 @@ class UsagePreferencesTest {
         assertEquals(true, saved.completed)
         assertEquals(UsageCategory.NAP, UsagePreferences.rank(listOf(saved), 1500, 65).first())
         assertEquals(UsageCategory.VIDEO, UsagePreferences.rank(listOf(saved), 200, 65).first())
+    }
+
+    @Test fun `music choices personalize the matching charging window without implying playback`() {
+        val choice = event("1", UsageCategory.MUSIC, remaining = 600)
+        assertEquals(UsageCategory.MUSIC, UsagePreferences.rank(listOf(choice), 700, 65).first())
+        assertEquals(UsageCategory.VIDEO, UsagePreferences.rank(listOf(choice), 1800, 65).first())
+        assertFalse(UsageCategory.MUSIC.supportsCompletion)
     }
 
     @Test fun `explicit own activity dislike ranks below a neutral category`() {
