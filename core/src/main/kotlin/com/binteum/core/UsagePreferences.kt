@@ -1,7 +1,7 @@
 package com.binteum.core
 
 enum class UsageCategory {
-    VIDEO, REST, REFLECTION, QUIZ, EXTERNAL_MEDIA, FOOD, WALK, NAP;
+    VIDEO, REST, REFLECTION, QUIZ, EXTERNAL_MEDIA, FOOD, WALK, NAP, MUSIC;
 
     /** A provider launch does not establish playback, arrival, a meal, or a completed walk. */
     val supportsCompletion: Boolean

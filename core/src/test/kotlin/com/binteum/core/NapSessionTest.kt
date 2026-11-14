@@ -77,4 +77,13 @@ class NapSessionTest {
         assertEquals(1, huge.tick(Long.MAX_VALUE - 999, Int.MAX_VALUE).remainingSeconds)
         assertTrue(huge.tick(Long.MAX_VALUE, Int.MAX_VALUE).finished)
     }
+
+    @Test fun `chosen five minute wake reserve shortens nap and survives changing charge estimates`() {
+        val nap = NapSession.start(1200, 900, 0, wakeReserveSeconds = 300)!!
+        assertEquals(600, nap.plannedDurationSeconds)
+        assertEquals(60, nap.tick(60000, 360).remainingSeconds)
+        assertEquals(30, nap.tick(90000, 900).remainingSeconds)
+        assertEquals(NapFinishReason.CHARGE_WINDOW_ENDING, nap.tick(120000, 900).finishReason)
+        assertNull(NapSession.start(600, 300, 0, wakeReserveSeconds = 300))
+    }
 }

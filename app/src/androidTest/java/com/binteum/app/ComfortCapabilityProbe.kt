@@ -1,6 +1,10 @@
 package com.binteum.app
 
 import ai.pleos.playground.vehicle.Vehicle
+import ai.pleos.playground.vehicle.api.model.area.SeatArea
+import ai.pleos.playground.vehicle.api.model.capability.CapabilityConfig
+import ai.pleos.playground.vehicle.api.model.capability.AccessType
+import ai.pleos.playground.vehicle.constant.control.MoveControl
 import ai.pleos.playground.vehicle.constant.area.SeatValue
 import ai.pleos.playground.vehicle.constant.unit.TemperatureUnit
 import android.app.Activity
@@ -29,7 +33,7 @@ class ComfortCapabilityProbe : Instrumentation() {
 
     override fun onStart() {
         val values = ConcurrentHashMap<String, String>()
-        val completed = CountDownLatch(4)
+        val completed = CountDownLatch(9)
         val finished = ConcurrentHashMap.newKeySet<String>()
         val alive = AtomicBoolean(true)
         fun complete(key: String) { if (finished.add(key)) completed.countDown() }
@@ -73,7 +77,35 @@ class ComfortCapabilityProbe : Instrumentation() {
                             }, { values["climatePower.error"] = describe(it); complete("power") })
                         } catch (error: Exception) { values["climatePower.error"] = describe(error); complete("power") }
                     }, { values["climatePower.error"] = describe(it); complete("power") })
+                    hvac.checkHvacTemperatureCurrentCapabilities({ config, areas ->
+                        values["cabinTemperature.access"] = config.accessType.name
+                        val zone = areas.filter { SeatValue.ROW_1_LEFT in it.values }.minByOrNull { it.values.size }
+                        if (zone == null || config.accessType !in setOf(AccessType.READ, AccessType.READ_WRITE)) complete("cabin")
+                        else try {
+                            hvac.getHvacTemperatureCurrent(zone, TemperatureUnit.CELSIUS, {
+                                values["cabinTemperature.measuredCelsius"] = it?.toString() ?: "unavailable"
+                                complete("cabin")
+                            }, { values["cabinTemperature.error"] = describe(it); complete("cabin") })
+                        } catch (error: Exception) { values["cabinTemperature.error"] = describe(error); complete("cabin") }
+                    }, { values["cabinTemperature.error"] = describe(it); complete("cabin") })
                     val seat = vehicle!!.getSeat()
+                    values["seat.sdkMovementCommands"] = MoveControl.entries.joinToString { it.name }
+                    values["seat.motionVerification"] = "not performed; advertised support only"
+                    fun movement(name: String, query: ((CapabilityConfig, List<SeatArea>) -> Unit, (Exception) -> Unit) -> Unit) {
+                        try {
+                            query({ config, areas ->
+                                values["seat.$name.access"] = config.accessType.name
+                                values["seat.$name.zones"] = areas.joinToString("; ") { it.values.joinToString { value -> value.name } }
+                                values["seat.$name.leftFrontAdvertised"] = (config.accessType in setOf(AccessType.WRITE, AccessType.READ_WRITE) &&
+                                    areas.any { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) }).toString()
+                                complete(name)
+                            }, { values["seat.$name.error"] = describe(it); complete(name) })
+                        } catch (error: Exception) { values["seat.$name.error"] = describe(error); complete(name) }
+                    }
+                    movement("backrestMove", seat::checkMoveSeatBackrestAngleCapabilities)
+                    movement("foreAftMove", seat::checkMoveSeatForeAftCapabilities)
+                    movement("heightMove", seat::checkMoveSeatHeightCapabilities)
+                    movement("tiltMove", seat::checkMoveSeatTiltCapabilities)
                     seat.checkSeatBackrestAnglePositionCapabilities({ config, areas ->
                         values["seat.positionAccess"] = config.accessType.name
                         values["seat.positionZones"] = areas.entries.joinToString("; ") {
@@ -83,7 +115,8 @@ class ComfortCapabilityProbe : Instrumentation() {
                     }, { values["seat.error"] = it.javaClass.simpleName; complete("seat") })
                 } catch (error: Exception) {
                     values["pleos.error"] = error.javaClass.simpleName
-                    complete("temperature"); complete("seat"); complete("power")
+                    complete("temperature"); complete("seat"); complete("power"); complete("cabin")
+                    listOf("backrestMove", "foreAftMove", "heightMove", "tiltMove").forEach(::complete)
                 }
                 try {
                     car = Car.createCar(targetContext, Handler(Looper.getMainLooper()), Car.CAR_WAIT_TIMEOUT_DO_NOT_WAIT) { connected, ready ->
