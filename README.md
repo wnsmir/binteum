@@ -2,7 +2,7 @@
 
 **충전 예상시간 또는 직접 설정한 대기시간에 맞춰 영상·음악·주변 장소·수면을 선택하는 Pleos Connect 앱입니다.**
 
-이 문서는 `codex/unified-waiting-flow` 브랜치의 **개발용 debug 앱**을 직접 시연하는 안내입니다. 기본 시연에는 YouTube API 키·Pleos 프로젝트 등록·별도 서버가 필요 없습니다. **주변 장소 검색만** 로컬 서버와 지도 데이터가 추가로 필요합니다.
+이 문서는 `main` 브랜치의 **개발용 debug 앱**을 직접 시연하는 안내입니다. 기본 시연에는 YouTube API 키·Pleos 프로젝트 등록·별도 서버가 필요 없습니다. **주변 장소 검색만** 로컬 서버와 지도 데이터가 추가로 필요합니다.
 
 - 한국어 이름: **웨이팅** / 영어 이름: **Waiting**
 - 비교 설치용 debug 이름: **웨이팅 · 친구** / **Waiting · Friend**
@@ -38,7 +38,7 @@
 처음 받는 경우 원하는 작업 폴더에서:
 
 ```bash
-git clone --branch codex/unified-waiting-flow https://github.com/wnsmir/binteum.git
+git clone --branch main https://github.com/wnsmir/binteum.git
 cd binteum
 git status --short --branch
 ```
@@ -48,11 +48,11 @@ git status --short --branch
 ```bash
 git status --short --branch
 git fetch origin
-git worktree add -b codex/local-demo ../waiting-demo origin/codex/unified-waiting-flow
+git worktree add -b codex/local-demo ../waiting-demo origin/main
 cd ../waiting-demo
 ```
 
-`codex/local-demo`나 `../waiting-demo`가 이미 있으면 새 이름을 사용하세요. `main`이나 `codex/ui-refinement`는 현재 화면과 다를 수 있습니다. 아래 명령은 모두 **이 README가 있는 저장소 루트**에서 실행합니다.
+`codex/local-demo`나 `../waiting-demo`가 이미 있으면 새 이름을 사용하세요. 최신 통합 버전은 `main`에 있으며, 이전 개발 브랜치는 현재 화면과 다를 수 있습니다. 아래 명령은 모두 **이 README가 있는 저장소 루트**에서 실행합니다.
 
 ## 2. 개발 환경과 에뮬레이터
 
