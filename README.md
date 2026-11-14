@@ -387,7 +387,7 @@ adb -s "$WAITING_SERIAL" forward --remove tcp:8088
 | `scripts/` | 프로젝트 범위 환경·빌드·AVD·지도 준비 |
 | `docs/implementation-status.md` | 날짜별 구현·검증·미완료 사항 |
 | `docs/sdk-integration.md` | 사용 SDK/API 전체와 검증 경계 |
-| `docs/design/` | [제출용 소개문](docs/design/waiting-submission-outline.txt)과 [화면 사용 안내 PDF](docs/design/waiting-wireframes.pdf). 실제 실행 증거와 구분 |
+| `docs/design/` | [제출용 소개문](docs/design/waiting-submission-outline.txt)과 [실제 화면 사용 안내 PDF](docs/design/waiting-screen-guide.pdf). 모의 충전 데이터로 촬영; 와이어프레임은 별도 참고 자료 |
 | `.github/workflows/android.yml` | GitHub 테스트·APK 빌드·lint |
 
 `docs/product-plan.md`, `docs/experience-plan.md` 등에는 미래 계획과 과거 UI가 포함되어 있습니다. **현재 기능은 이 README와 최신 구현·검증 기록을 우선**합니다. 공조·배경음 설정, 자체 호흡/명상/퀴즈, 새 시트 자세 저장, 인앱 Netflix 스트리밍, Gleo 자동 알림은 현재 완료 기능으로 소개하지 않습니다.
