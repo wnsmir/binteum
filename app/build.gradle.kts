@@ -32,6 +32,7 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            applicationIdSuffix = ".friend"
             buildConfigField("String", "NEARBY_API_BASE_URL", quotedBuildValue(nearbyApiOverride.ifEmpty { "http://127.0.0.1:3210" }))
         }
         getByName("release") {
