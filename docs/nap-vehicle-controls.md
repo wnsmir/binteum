@@ -1,20 +1,22 @@
-# 낮잠의 차량 지원 상태 — 2026-11-12
+# 수면의 차량 지원 상태 — 2026-11-14
 
-빈틈의실은 낮잠 설정에서 실제 실내 온도, 공조 전원, 설정 온도와 시트 지원 정보를 구분한다. 지원하지 않거나 응답이 없으면 값을 만들지 않는다. 시트 지원 조회는 읽기 전용이며, SDK가 이동 기능을 제공한다는 사실과 해당 차량에서 실제 이동·정지가 검증됐다는 사실을 구분한다.
+현재 수면 섹션에는 **남은 시간 동안 수면**과 **시트 위치 설정**만 있다. 공조·온도·배경음·기상 준비 시간 설정은 현재 화면에서 제거했다. 아래 SDK 지원 사실과 실제 차량에서 검증된 동작은 구분한다.
 
-## 현재 앱에서 하는 일
+## 현재 수면 동작
 
-| 항목 | 현재 구현 |
-| --- | --- |
-| 실내 온도 | `checkHvacTemperatureCurrentCapabilities`와 `getHvacTemperatureCurrent`로 앞좌석 왼쪽을 포함하는 최소 구역의 실제 센서값 조회. `cabinCelsius`이며 목표 설정값과 별도 표시 |
-| 공조 전원 | `checkHvacPowerCapabilities`와 `getHvacPowerState`로 조회. 자동으로 켜거나 끄지 않음 |
-| 목표 온도 | 지원되는 범위·간격 안에서 20–24°C 선택. 이 범위는 제품 선택지이며 수면에 적합한 의학적 온도 주장 아님 |
-| 온도 적용 | 사용자가 직접 누른 경우에만 권한·capability·현재값·P단·최신 속도 0·앱 상태 확인 후 `setHvacTemperature` 호출. 별도의 getter가 선택한 값과 일치해야 성공 표시. ‘온도 적용 후 낮잠 시작’도 이 확인 이후에만 시작하며 실패·상태 변화·화면 이탈·시간 초과 시 예약 시작 취소 |
-| 온도 복원 | 이전 값을 저장하고 별도 복원 버튼 제공. 다른 곳에서 온도가 바뀌었거나 구역이 달라지면 기존 값으로 덮어쓰지 않음. 낮잠 시작·종료·화면 이탈에서 자동 쓰기 없음 |
-| 시트 등받이 위치 | `checkSeatBackrestAnglePositionCapabilities` 후 읽기 가능한 경우 원시 Int 값만 진단. 각도·기울기 퍼센트로 해석하지 않음 |
-| 시트 이동 지원 | 등받이·앞뒤·높이·방석 기울기 4가지의 MOVE capability와 앞좌석 왼쪽 단일 구역 지원 여부 조회. 실제 모터 명령은 보내지 않음 |
+- `NapSession.forRemainingTime`으로 타이머·충전 추정·출발 제한에 따른 현재 이용 가능 시간 전체를 사용한다. 별도 기상 준비 시간을 빼지 않는다.
+- 시작 시 미디어를 중지하고 화면 밝기를 낮추며, 앱 영역 전체를 검게 표시한다. 카운트다운과 종료 버튼만 남는다.
+- 종료 버튼은 수면만 끝내고 기존 화면·스크롤·밝기를 복원한다. 메인 대기 타이머는 계속된다.
+- 시간 예산이 줄면 종료 시점을 앞당긴다. 늘어나도 진행 중 수면을 자동 연장하지 않는다.
+- 화면 이탈·차량 안전 상태 미확인 시 수면을 종료한다. 앱 종료·기기 절전 이후 기상음을 보장하지 않는다. 실제 기상음 청취는 별도 확인이 필요하다.
+- 수면 시작·종료 시 공조·시트를 자동 조작하지 않는다.
 
-공조/시트 조회는 속도 권한과 별도로 수행한다. 따라서 속도 권한이 아직 없거나 공조 설정값 읽기가 실패해도 시트 지원 상태와 읽을 수 있는 공조 정보를 보여줄 수 있다. 모든 선택적 조회는 8초 이내로 제한하며, 새 조회·화면 이탈 뒤 도착한 이전 콜백은 버린다. 실패·권한 누락·미확인 상태를 정상 지원으로 표시하지 않는다.
+## 현재 시트 설정
+
+- 지원되는 차량의 기존 앞좌석 왼쪽 메모리 번호 선택·로컬 기억·명시적 적용 요청.
+- 새 자세 저장, 수면 자세 자동 생성, 임의 시간 동안 모터 구동 기능은 제공하지 않는다.
+- 메모리 capability 조회는 공조 조회와 분리해 공조 응답 실패가 시트 설정을 막지 않게 했다.
+- 기존 공조 읽기/쓰기 로직은 `ComfortController`에 남아 있으나 현재 수면 UI에서 호출하거나 제공하는 기능은 아니다.
 
 ## 실제 SDK에 있는 시트 API
 
@@ -32,9 +34,17 @@
 
 `MoveControl`은 `BACKWARD(-1)`, `STOP(0)`, `FORWARD(1)`이다. **STOP 명령은 존재한다.** 그러나 이 API는 절대 각도나 원하는 위치를 전달하는 setter가 아니다. 기기별 이동 방향·속도, STOP 전달 실패 시 동작, 연결 해제·앱 중단 중 정지, 원시 위치의 의미는 실제 차량에서 검증하지 않았다. 따라서 특정 초 동안 움직이는 방식이나 원시값을 임의의 각도로 바꾸는 자동 젖힘 기능은 추가하지 않았다.
 
-`selectSeatMemory`도 있지만 슬롯이 사용자에게 어떤 자세인지, 기존 자세를 새 슬롯에 저장·복원하는 흐름은 이 앱에서 확인되지 않았다. 낮잠 시작 시 임의 메모리 슬롯을 선택하지 않는다. 열선/통풍 setter도 SDK에 있지만 이번 변경에는 연결하지 않았다.
+`selectSeatMemory`로 **차량에서 이미 저장한 앞좌석 왼쪽 메모리**를 적용 요청한다. `checkSeatMemoryCapabilities`의 WRITE/READ_WRITE와 단일 ROW_1_LEFT 구역·번호 범위를 매번 다시 확인하고, CAR_SEATS·CONTROL_CAR_SEATS·CAR_POWERTRAIN·CAR_SPEED 권한, 현재 P단과 2초 이내 속도 0, 화면/안전 상태를 확인해야 호출한다. 중복 탭·지연된 콜백·화면 이탈은 무효화한다.
 
-시트 UI의 “지원 확인”은 위 capability의 응답을 뜻한다. 자동 이동이 활성화됐다는 뜻이 아니며, 실제 자세는 차량의 시트 버튼으로 맞춘다.
+앱은 사용자가 선택한 **기존 메모리 번호만** 로컬 설정에 기억한다. SDK 2.3.2의 Seat에는 현재 자세를 메모리에 저장하는 API와 메모리 적용 완료 콜백/선택 메모리 readback이 없다. 따라서 새 자세는 차량에서 저장해야 하며 반환 후에는 ‘적용 요청을 보냈습니다’로만 표시한다. 늦은 실패 콜백은 실패로 갱신한다. 수면 시작·종료에 자동 적용하거나 원래 위치를 복원하지 않는다. 열선/통풍 setter도 연결하지 않았다.
+
+시트 UI의 지원 번호는 capability 응답이다. 슬롯에 저장된 자세 내용과 실제 이동 완료는 차량에서 확인해야 한다.
+
+## 2026-11-14 결과
+
+- 에뮬레이터 user 10 읽기 진단: 메모리 access=WRITE, ROW_1_LEFT 번호 1..2. CAR_SPEED 권한=false. 실제 이동 명령은 보내지 않았다.
+- SeatMemoryGuardProbe의 가짜 Seat 인터페이스로 10개 검사 통과: 안전 상태/권한/쓰기 지원/번호 범위/좌석 구역/신선한 주차 확인 누락, 중복 탭, 화면 이탈 후 콜백 차단. 실제 Vehicle 인스턴스나 모터를 사용하지 않는다.
+- 수면은 `NapSession.forRemainingTime`으로 현재 시간 예산 전체를 사용하며 별도 준비 시간과 15분 상한이 없다. 예산이 늘어도 진행 중 수면을 자동 연장하지 않는다.
 
 ## 검증 경계
 
@@ -46,6 +56,7 @@
 
 ## 근거
 
+- [메모리 선택](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/select-seat-memory)
 - [Pleos Seat API](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/entry)
 - [등받이 MOVE capability](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/check-move-seat-backrest-angle-capabilities)
 - [등받이 이동](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/seat/move-seat-backrest-angle)

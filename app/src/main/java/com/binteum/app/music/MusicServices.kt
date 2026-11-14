@@ -27,6 +27,25 @@ object MusicLinks {
     }
 }
 
+enum class MusicRoute { APP, BROWSER, PHONE }
+
+object MusicAvailability {
+    fun route(context: Context, provider: MusicProvider): MusicRoute {
+        val intent = Intent(Intent.ACTION_VIEW, MusicLinks.home(provider))
+            .addCategory(Intent.CATEGORY_BROWSABLE).setPackage(provider.appPackage)
+        val appHandler = runCatching {
+            context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY).any {
+                it.activityInfo?.let { activity -> activity.enabled && activity.exported } == true
+            }
+        }.getOrDefault(false)
+        return when {
+            appHandler -> MusicRoute.APP
+            MusicBrowserResolver.packages(context, MusicLinks.home(provider)).isNotEmpty() -> MusicRoute.BROWSER
+            else -> MusicRoute.PHONE
+        }
+    }
+}
+
 enum class MusicOpenResult { OPENED_APP, OPENED_LINK, NO_HANDLER, BLOCKED;
     val opened: Boolean get() = this == OPENED_APP || this == OPENED_LINK
 }

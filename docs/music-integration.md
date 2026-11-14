@@ -34,3 +34,8 @@ Apple은 MusicKit for Android/Web를 제공하며 서비스 API 통신에 서명
 `MusicIntegrationProbe`는 네트워크나 실제 UI/계정 접근 없이 시간 경계, 공식 URL 범위, 인텐트 대상, 안전 조건, 앱 미설치 시 fallback을 검사한다. 해당 검사는 실계정 로그인·음악 재생 성공을 대신하지 않는다. 빌드/기기 검사 결과는 상위 구현 상태 기록에 반영한다.
 
 현재 Pleos 에뮬레이터의 기본 HTTPS 처리기는 `org.chromium.webview_shell`이었다. 이 테스트용 WebView 화면을 로그인 가능한 정식 브라우저로 취급하지 않는다. `MusicBrowserPolicy`는 이 경우 브라우저 후보를 비우며 실제 서비스 앱도 없으면 `NO_HANDLER`로 휴대폰 QR를 사용한다. 브라우저 후보 발견 자체도 OAuth·DRM·음악 재생 검증은 아니다. 패키지 가시성은 음악 서비스 3개와 필요한 intent 유형만 선언한다. [Android 패키지 가시성](https://developer.android.com/training/package-visibility/declaring)
+
+
+## 2026-11-14 현재 기기 진단
+
+user 10에서 YouTube Music·Apple Music·Spotify 앱이 모두 미설치이며 적합한 브라우저도 각 0개다. 따라서 음악 재생·계정 로그인을 성공했다고 표시할 수 없다. 선택 메뉴는 실제 라우트(APP/BROWSER/PHONE)를 확인해 설명과 ‘서비스 열기 · 로그인’ 또는 ‘휴대폰으로 열기 · QR’를 표시한다. 서비스 선택 저장은 계정 연결이 아니다. 공식 앱/적합한 브라우저 설치와 해당 서비스 로그인·재생은 별도 검증이 필요하다.

@@ -60,6 +60,18 @@ class NapSession private constructor(
     companion object {
         const val MIN_WAKE_RESERVE_SECONDS = 2 * 60
 
+        /** Full remaining time, with no separate duration or wake buffer. */
+        fun forRemainingTime(availableSeconds: Int?, nowElapsedMillis: Long): NapSession? {
+            if (availableSeconds == null || availableSeconds <= 0 || nowElapsedMillis < 0) return null
+            return NapSession(nowElapsedMillis, availableSeconds, 0,
+                safeAddMillis(nowElapsedMillis, availableSeconds * 1000L), NapFinishReason.CHARGE_WINDOW_ENDING)
+        }
+
+        /** Sleep uses the complete current timer/charge/departure window, minus the wake buffer. */
+        fun forWindow(availableSeconds: Int?, nowElapsedMillis: Long,
+            wakeReserveSeconds: Int = MIN_WAKE_RESERVE_SECONDS): NapSession? =
+            availableSeconds?.let { start(it, it, nowElapsedMillis, wakeReserveSeconds) }
+
         /** Unknown time requires a known departure limit or renewed vehicle estimate first. */
         fun start(
             requestedSeconds: Int,

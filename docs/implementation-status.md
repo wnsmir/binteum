@@ -1,4 +1,28 @@
-# 빈틈의실 구현·검증 기록
+# 웨이팅 구현·검증 기록
+
+## 최신 상태 — 2026-11-14
+
+현재 브랜치 `codex/unified-waiting-flow`, 별도 설치 패키지 `com.binteum.app.friend`. 아래 날짜별 기록은 당시 버전이며 현재 기능 목록을 대신하지 않는다. 실행 절차는 [README](../README.md), SDK 전체는 [연동 현황](sdk-integration.md), 제출용 소개는 [문안](design/waiting-submission-outline.txt)을 따른다.
+
+- 표시 이름: 한국어 웨이팅, 영어 Waiting. 비교 설치용 debug는 웨이팅 · 친구 / Waiting · Friend. 패키지·설정·기록 보존.
+- 수면 섹션: 남은 시간 동안 수면 / 시트 위치 설정 두 버튼만 유지. 준비 시간 없이 현재 이용 가능 시간 전체 사용. 수면 중 검은 앱 화면에 카운트다운과 종료 버튼만 표시. 종료 시 화면·스크롤·밝기 복원, 메인 타이머 유지.
+- 현재 UI에서 공조·온도·배경음·기상 준비 설정 제거. 기존 backend 코드가 있다는 이유로 현재 제공 기능으로 소개하지 않음.
+- 시트: 기존 앞좌석 왼쪽 메모리 선택·기억·명시적 적용 요청. 새 자세 저장 API 및 적용 완료 readback 없음. 지원 응답 WRITE, ROW_1_LEFT 1..2 확인. 실제 이동 미검증.
+- 위치 문제: Pleos Connect 2.1.0 ARM64의 ungrouped FUSED_LOCATION 권한 팝업이 검은 글자/검은 배경으로 표시돼 앱을 가리는 현상 관찰. 앱 ANR로 확인된 것은 아님. 해당 이미지에서 문제 팝업 대신 안내 표시, 정상 기기는 공식 runtime 요청 유지.
+- 사용자의 명시적 동의 후 실제 current user를 확인하고 user 10의 com.binteum.app.friend에 FUSED_LOCATION 하나만 adb로 허용. Mac 위치 권한 변경 없음.
+- 공개 강남역 시험 GPS를 에뮬레이터에 설정. 실제 FusedLocation SDK에서 fresh fix 수신 → 실제 Android 클라이언트 → 로컬 BFF → OSM/Valhalla 조회 성공. 장소 3곳·왕복 경로 3건. 실제 차량 위치 또는 모의 충전이 실제 충전임을 의미하지 않음.
+- 음악: 지원 서비스 앱 3개·일반 브라우저 없음 확인, QR 경로 제공. 로그인·실제 스트리밍 미검증.
+- YouTube 임베드 구현은 존재하나 현재 버전의 실제 영상/소리 재검수 미완료. Pleos TTS 실제 소리도 미확인. Gleo 자동 알림 완료로 소개하지 않음.
+
+### 실제 수행 검사
+
+- core 87개 통과, APK 빌드 성공, lint 오류 0개·경고 63개.
+- WaitingFlowProbe 48개 통과: 모의 차량 주입 기반 예산·화면·안전 제한·수면 화면·종료 복귀. 실제 차량 쓰기 없음.
+- NearbySdkIntegrationProbe 통과: permissionGranted=true, FRESH_SDK_FIX, OSM 장소 3개·왕복 경로 3개. 공개 시험 GPS 사용, 좌표 로그 없음.
+- 서버 단위 검사 16개 통과. README의 POI 준비 명령으로 프로젝트 전용 venv 설치 및 공식 지도 캐시에서 실제 POI 119,684개 생성. 원본 다운로드는 기존 공식 캐시 재사용. 생성된 기본 경로 인덱스로 서버 재시작.
+- 실제 앱 PixelCopy 9개 화면 캡처 중 수면 섹션과 검은 수면 화면 육안 확인. 시연 데이터 SOC 65%·시간 20분을 명시적으로 주입한 화면이며 외부 재생/위치/모터 검증 자료가 아님.
+- SeatMemoryGuardProbe 10개, MusicIntegrationProbe 40개는 앞선 동일 구현 검사 기록. 가짜 Seat 안전 경계 및 외부 연결 조건 검사이며 계정·모터에 접근하지 않음.
+- ReadmeDemoProbe 13개 통과: 정상 debug 모의 충전 소스, 실제 UI 버튼과 단조 시계 ticker로 설정→타이머→수면→종료→설정 적용 실행. 테스트에서 차량/시간 상태를 주입하지 않음. 시연용 수면 선택 1건 기록. 앱 코드 크래시는 없으며 초기 테스트의 잘못된 클릭 대상/null 탐색을 수정한 뒤 통과.
 
 ## 활동 화면 통합 — 2026-11-12
 

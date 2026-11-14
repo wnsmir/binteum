@@ -59,7 +59,9 @@ object AppTheme {
         accent = 0xFF262626.toInt(), onAccent = Color.WHITE, border = 0xFFB8B8B8.toInt(),
         warning = 0xFF8A4700.toInt(), warningSurface = 0xFFFFE9CD.toInt(), flat = true)
 
-    fun palette(context: Context, mode: ThemeMode, backgroundMode: BackgroundMode = BackgroundMode.AUTO): AppPalette {
+    fun palette(context: Context, mode: ThemeMode, backgroundMode: BackgroundMode = BackgroundMode.SYSTEM): AppPalette {
+        if (backgroundMode == BackgroundMode.SYSTEM) return if (context.resources.configuration.uiMode and
+            Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES) black else white
         if (backgroundMode == BackgroundMode.BLACK) return black
         if (backgroundMode == BackgroundMode.WHITE) return white
         val useDark = when (mode) {

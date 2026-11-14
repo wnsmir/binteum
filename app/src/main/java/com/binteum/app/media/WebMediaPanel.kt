@@ -284,12 +284,12 @@ class WebMediaPanel(context: Context) : LinearLayout(context) {
         card.addView(TextView(context).apply {
             text = sample.title; textSize = 25f; setTextColor(palette.text)
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(4), dp(14), dp(4), dp(4))
+            setPadding(dp(8), dp(20), dp(8), dp(10))
             maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
         })
         card.addView(TextView(context).apply {
             text = sample.author; textSize = 19f; setTextColor(palette.textMuted)
-            setPadding(dp(4), 0, dp(4), dp(10))
+            setPadding(dp(8), 0, dp(8), dp(16))
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
         })
         card.addView(TextView(context).apply {

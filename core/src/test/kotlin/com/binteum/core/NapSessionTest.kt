@@ -4,6 +4,51 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NapSessionTest {
+    @Test fun `simple sleep uses every remaining second with no hidden buffer`() {
+        assertEquals(1200, NapSession.forRemainingTime(1200, 0)!!.plannedDurationSeconds)
+        assertEquals(1, NapSession.forRemainingTime(1, 0)!!.plannedDurationSeconds)
+        val sleep = NapSession.forRemainingTime(60, 0)!!
+        assertEquals(1, sleep.tick(59000, 1).remainingSeconds)
+        assertTrue(sleep.tick(60000, 0).shouldWake)
+        assertFalse(sleep.tick(61000, 0).shouldWake)
+    }
+
+    @Test fun `simple sleep needs a known positive remaining time`() {
+        assertNull(NapSession.forRemainingTime(null, 0))
+        assertNull(NapSession.forRemainingTime(0, 0))
+        assertNull(NapSession.forRemainingTime(-1, 0))
+        assertNull(NapSession.forRemainingTime(60, -1))
+    }
+
+    @Test fun `simple sleep shortens to the current budget but never extends itself`() {
+        val sleep = NapSession.forRemainingTime(1200, 0)!!
+        assertEquals(200, sleep.tick(30000, 200).remainingSeconds)
+        assertEquals(170, sleep.tick(60000, 1800).remainingSeconds)
+        assertTrue(sleep.cancel(65000).finished)
+        assertFalse(sleep.tick(230000, 0).shouldWake)
+    }
+
+    @Test fun `sleep uses full remaining timer instead of a separate duration choice`() {
+        assertEquals(1020, NapSession.forWindow(1200, 0, 180)!!.plannedDurationSeconds)
+        assertEquals(3420, NapSession.forWindow(3600, 0, 180)!!.plannedDurationSeconds)
+        assertEquals(30, NapSession.forWindow(210, 0, 180)!!.plannedDurationSeconds)
+    }
+
+    @Test fun `sleep is unavailable without a usable timer window`() {
+        assertNull(NapSession.forWindow(null, 0, 180))
+        assertNull(NapSession.forWindow(180, 0, 180))
+        assertNull(NapSession.forWindow(0, 0, 180))
+        assertNull(NapSession.forWindow(-1, 0, 180))
+    }
+
+    @Test fun `timer sleep follows a shorter budget and never extends on a later estimate`() {
+        val sleep = NapSession.forWindow(1200, 0, 180)!!
+        assertEquals(960, sleep.tick(60000, 1140).remainingSeconds)
+        assertEquals(120, sleep.tick(90000, 300).remainingSeconds)
+        assertEquals(90, sleep.tick(120000, 2400).remainingSeconds)
+        assertTrue(sleep.tick(210000, 2310).shouldWake)
+    }
+
     @Test fun `requested nap is capped by charge window and reserves time to wake`() {
         val nap = NapSession.start(1200, 900, 1000)!!
         assertEquals(780, nap.plannedDurationSeconds)

@@ -31,6 +31,7 @@ enum class ComfortStatus {
 }
 
 enum class ComfortReadStatus { NOT_CHECKED, CHECKING, AVAILABLE, UNAVAILABLE, PERMISSION_REQUIRED }
+enum class SeatMemoryStatus { NOT_CHECKED, CHECKING, READY, UNAVAILABLE, PERMISSION_REQUIRED, PARK_REQUIRED, REQUEST_SENT, FAILED }
 enum class SeatAdjustment { BACKREST, FORE_AFT, HEIGHT, TILT }
 
 /** Advertised capabilities only. No field authorizes or claims verified seat motion. */
@@ -53,6 +54,9 @@ data class ComfortState(
     /** Vehicle-specific raw position, deliberately not presented as degrees or percent. */
     val seatPosition: Int? = null,
     val seatSupport: SeatSupport = SeatSupport(),
+    val memoryStatus: SeatMemoryStatus = SeatMemoryStatus.NOT_CHECKED,
+    /** Existing vehicle memory slots for the explicitly named front-left seat, not saved poses. */
+    val memorySlots: List<Int> = emptyList(),
     /** Measured cabin temperature, distinct from the HVAC target setpoint. */
     val cabinCelsius: Float? = null,
     val climatePowerOn: Boolean? = null,
@@ -68,6 +72,8 @@ data class ComfortState(
  * The SDK exposes continuous seat MOVE rather than an absolute position setter.
  * Without a verified movement/stop contract we read its raw position only. No
  * guessed recline angle, timed seat pulse, or automatic seat restoration is used.
+ * applySeatMemory explicitly selects an existing vehicle memory after a fresh capability and
+ * parked check. There is no save-memory API or completion callback; REQUEST_SENT is not success.
  */
 class ComfortController(
     context: Context,
@@ -92,11 +98,13 @@ class ComfortController(
     private var operationStartedAt = 0L
     private var inspection = 0L
     private var inspectionTimeout: Runnable? = null
+    private var memoryInspection = 0L
+    private var memoryOperation = false
 
     var state = ComfortState()
         private set
 
-    fun start(onChanged: (ComfortState) -> Unit) = onMain {
+    fun start(inspectClimate: Boolean = true, onChanged: (ComfortState) -> Unit) = onMain {
         stopInternal()
         listener = onChanged
         active = true
@@ -116,7 +124,7 @@ class ComfortController(
                 properties = if (ready) runCatching {
                     connected.getCarManager(Car.PROPERTY_SERVICE) as? CarPropertyManager
                 }.getOrNull() else null
-                if (ready) refresh() else emit(state.copy(status = ComfortStatus.UNAVAILABLE, canSet = false, canRestore = false))
+                if (ready) { if (inspectClimate) refresh() else refreshSeatMemory() } else emit(state.copy(status = ComfortStatus.UNAVAILABLE, canSet = false, canRestore = false))
             }
             // A connection that never arrives must not leave a permanent spinner.
             handler.postDelayed({
@@ -136,6 +144,7 @@ class ComfortController(
         if (!active || state.busy) return@onMain
         // Read-only seat/climate information does not depend on speed/control permissions.
         readComfortInformation()
+        readSeatMemoryInformation()
         val token = begin() ?: return@onMain
         readConfiguration(token) { config ->
             readCurrent(token, config) { current ->
@@ -155,6 +164,11 @@ class ComfortController(
         }
     }
 
+    /** Seat-only screen inspection does not wait on unrelated climate properties. */
+    fun refreshSeatMemory() = onMain {
+        if (active && !state.busy) readSeatMemoryInformation()
+    }
+
     /** Explicit user action. 20–24 °C are choices, not a medical sleeping-temperature claim. */
     fun setTemperature(celsius: Float) = onMain { write(celsius, restoring = false) }
 
@@ -162,6 +176,80 @@ class ComfortController(
     fun restoreTemperature() = onMain {
         val previous = original ?: return@onMain
         write(previous, restoring = true)
+    }
+
+    /** Explicit user action only; never called by sleep start/end or by selecting a saved slot. */
+    fun applySeatMemory(slot: Int) = onMain {
+        if (!safe() || state.busy) return@onMain
+        val token = begin(forMemory = true) ?: return@onMain
+        val generation = epoch
+        val api = seat ?: run { fail(token, ComfortStatus.UNAVAILABLE); return@onMain }
+        try {
+            api.checkSeatMemoryCapabilities({ config, areas -> onMain capability@{
+                if (!valid(token)) return@capability
+                val area = areas.keys.singleOrNull { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) }
+                val bounds = area?.let(areas::get)
+                val slots = memorySlots(config, bounds?.minValue, bounds?.maxValue)
+                if (area == null || slot !in slots) { fail(token, ComfortStatus.UNAVAILABLE); return@capability }
+                emit(state.copy(memorySlots = slots))
+                readParked(token) { parked ->
+                    if (!parked || !safe()) { fail(token, ComfortStatus.PARK_REQUIRED); return@readParked }
+                    if (!has(PleosPermission.CONTROL_CAR_SEATS) || !has(PleosPermission.CAR_SEATS)) {
+                        fail(token, ComfortStatus.PERMISSION_REQUIRED); return@readParked
+                    }
+                    try {
+                        api.selectSeatMemory(area, slot) { onMain {
+                            // Failure can arrive after the fire-and-forget call returns.
+                            if (active && generation == epoch && token == operation) {
+                                if (state.busy) fail(token, ComfortStatus.UNCONFIRMED)
+                                else emit(state.copy(memoryStatus = SeatMemoryStatus.FAILED))
+                            }
+                        } }
+                        finish(token, state.copy(status = ComfortStatus.UNCONFIRMED,
+                            memoryStatus = SeatMemoryStatus.REQUEST_SENT))
+                    } catch (_: Exception) { fail(token, ComfortStatus.UNCONFIRMED) }
+                }
+            } }, { fail(token, ComfortStatus.UNAVAILABLE) })
+        } catch (_: Exception) { fail(token, ComfortStatus.UNAVAILABLE) }
+    }
+
+    private fun memorySlots(config: CapabilityConfig, min: Int?, max: Int?): List<Int> =
+        if (config.accessType !in WRITE_ACCESS || min == null || max == null || min < 0 ||
+            max < min || max.toLong() - min > 15) emptyList() else (min..max).toList()
+
+    private fun readSeatMemoryInformation() {
+        val request = ++memoryInspection
+        val generation = epoch
+        val startedAt = SystemClock.elapsedRealtime()
+        var completed = false
+        fun current() = active && generation == epoch && request == memoryInspection && !completed &&
+            SystemClock.elapsedRealtime() - startedAt in 0L..TIMEOUT_MS
+        if (!has(PleosPermission.CAR_SEATS)) {
+            emit(state.copy(memoryStatus = SeatMemoryStatus.PERMISSION_REQUIRED, memorySlots = emptyList())); return
+        }
+        val api = seat ?: run {
+            emit(state.copy(memoryStatus = SeatMemoryStatus.UNAVAILABLE, memorySlots = emptyList())); return
+        }
+        emit(state.copy(memoryStatus = SeatMemoryStatus.CHECKING, memorySlots = emptyList()))
+        fun unavailable() = onMain {
+            if (current()) { completed = true; emit(state.copy(memoryStatus = SeatMemoryStatus.UNAVAILABLE, memorySlots = emptyList())) }
+        }
+        handler.postDelayed({
+            if (active && generation == epoch && request == memoryInspection && !completed) {
+                completed = true
+                emit(state.copy(memoryStatus = SeatMemoryStatus.UNAVAILABLE, memorySlots = emptyList()))
+            }
+        }, TIMEOUT_MS)
+        try {
+            api.checkSeatMemoryCapabilities({ config, areas -> onMain {
+                if (!current()) return@onMain
+                val area = areas.keys.singleOrNull { it.values.contentEquals(arrayOf(SeatValue.ROW_1_LEFT)) }
+                val bounds = area?.let(areas::get)
+                val slots = memorySlots(config, bounds?.minValue, bounds?.maxValue)
+                completed = true
+                emit(state.copy(memorySlots = slots, memoryStatus = if (slots.isEmpty()) SeatMemoryStatus.UNAVAILABLE else SeatMemoryStatus.READY))
+            } }, { unavailable() })
+        } catch (_: Exception) { unavailable() }
     }
 
     /** Releases connections only. An applied temperature remains until explicitly changed. */
@@ -358,16 +446,22 @@ class ComfortController(
         } catch (_: Exception) { complete("position") }
     }
 
-    private fun begin(): Long? {
+    private fun begin(forMemory: Boolean = false): Long? {
         if (!active || state.busy) return null
-        if (!has(PleosPermission.CAR_CLIMATE) || !has(PleosPermission.CONTROL_CAR_CLIMATE) ||
-            !has("android.car.permission.CAR_POWERTRAIN") || !has("android.car.permission.CAR_SPEED")) {
-            emit(state.copy(status = ComfortStatus.PERMISSION_REQUIRED, canSet = false, canRestore = false)); return null
+        val required = if (forMemory) listOf(PleosPermission.CAR_SEATS, PleosPermission.CONTROL_CAR_SEATS)
+            else listOf(PleosPermission.CAR_CLIMATE, PleosPermission.CONTROL_CAR_CLIMATE)
+        if (required.any { !has(it) } || !has("android.car.permission.CAR_POWERTRAIN") || !has("android.car.permission.CAR_SPEED")) {
+            emit(state.copy(status = ComfortStatus.PERMISSION_REQUIRED, canSet = false, canRestore = false,
+                memoryStatus = if (forMemory) SeatMemoryStatus.PERMISSION_REQUIRED else state.memoryStatus)); return null
         }
+        memoryOperation = forMemory
+        // A stale read-only capability response must not overwrite the apply result.
+        if (forMemory) memoryInspection++
         operation += 1
         val token = operation
         operationStartedAt = SystemClock.elapsedRealtime()
-        emit(state.copy(busy = true, status = ComfortStatus.CHECKING, canSet = false, canRestore = false, currentCelsius = null))
+        emit(state.copy(busy = true, status = ComfortStatus.CHECKING, canSet = false, canRestore = false, currentCelsius = null,
+            memoryStatus = if (forMemory) SeatMemoryStatus.CHECKING else state.memoryStatus))
         timeout?.let(handler::removeCallbacks)
         timeout = Runnable { fail(token, ComfortStatus.UNCONFIRMED) }.also { handler.postDelayed(it, TIMEOUT_MS) }
         return token
@@ -383,11 +477,17 @@ class ComfortController(
     }
 
     private fun fail(token: Long, status: ComfortStatus) = onMain {
-        finish(token, state.copy(status = status, canSet = false, canRestore = false, originalCelsius = original))
+        finish(token, state.copy(status = status, canSet = false, canRestore = false, originalCelsius = original,
+            memoryStatus = if (!memoryOperation) state.memoryStatus else when (status) {
+                ComfortStatus.PERMISSION_REQUIRED -> SeatMemoryStatus.PERMISSION_REQUIRED
+                ComfortStatus.PARK_REQUIRED -> SeatMemoryStatus.PARK_REQUIRED
+                ComfortStatus.UNAVAILABLE -> SeatMemoryStatus.UNAVAILABLE
+                else -> SeatMemoryStatus.FAILED
+            }))
     }
 
     private fun stopInternal() {
-        active = false; epoch += 1; operation += 1; inspection += 1
+        active = false; epoch += 1; operation += 1; inspection += 1; memoryInspection += 1
         timeout?.let(handler::removeCallbacks); timeout = null
         inspectionTimeout?.let(handler::removeCallbacks); inspectionTimeout = null
         properties = null
@@ -395,7 +495,8 @@ class ComfortController(
         runCatching { vehicle?.release() }; vehicle = null; hvac = null; seat = null
         worker?.shutdownNow(); worker = null
         state = state.copy(busy = false, status = ComfortStatus.STOPPED, canSet = false, canRestore = false,
-            currentCelsius = null, seatPosition = null, seatSupport = SeatSupport(), cabinCelsius = null, climatePowerOn = null)
+            currentCelsius = null, seatPosition = null, seatSupport = SeatSupport(), cabinCelsius = null, climatePowerOn = null,
+            memoryStatus = SeatMemoryStatus.NOT_CHECKED, memorySlots = emptyList())
         listener = null
     }
 

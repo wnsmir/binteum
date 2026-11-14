@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">"빈틈의실"</string>
+    <string name="app_name">"웨이팅"</string>
     <string name="video_recommendation_heading">"남은 시간 %1$02d:%2$02d · 추천 %3$d개"</string>
     <string name="video_duration">"%1$d:%2$02d"</string>
     <string name="video_card_description">"%1$s, %2$d분 %3$d초, 이 화면에서 재생"</string>
@@ -13,9 +13,9 @@
     <string name="text_size">"글자 크기"</string>
     <string name="text_size_detail">"메뉴·버튼·안내 글자 크기를 조절합니다. 기기의 기본 글자 크기에 적용되며, 외부 영상 플레이어는 별도입니다."</string>
     <string name="text_small">"작게 (85%)"</string>
-    <string name="text_default">"기본 (100%)"</string>
+    <string name="text_default">"보통 (100%)"</string>
     <string name="text_large">"크게 (115%)"</string>
-    <string name="text_largest">"아주 크게 (130%)"</string>
+    <string name="text_largest">"아주 크게 (130%, 기본)"</string>
     <string name="sky_auto">"시간에 맞춰 자동"</string>
     <string name="sky_dawn">"아침 노을"</string>
     <string name="sky_day">"한낮의 하늘"</string>
@@ -29,4 +29,5 @@
     <string name="recent_content">"최근 콘텐츠 · %1$s"</string>
     <string name="server_error">"서버 응답 오류 %1$d. 다시 열기를 눌러 주세요."</string>
     <string name="video_error">"영상 재생 오류 (%1$s). 다시 열기를 눌러 주세요."</string>
+    <string name="sky_system">시스템 설정 (기본)</string>
 </resources>

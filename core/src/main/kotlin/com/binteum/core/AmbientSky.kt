@@ -1,8 +1,8 @@
 package com.binteum.core
 
 enum class BackgroundMode(val title: String) {
-    AUTO("시간에 맞춰 자동"), DAWN("아침 노을"), DAY("한낮의 하늘"), SUNSET("저녁 노을"), NIGHT("밤"), BLACK("단색 블랙"), WHITE("단색 화이트");
-    val isFlat: Boolean get() = this == BLACK || this == WHITE
+    BLACK("단색 블랙"), WHITE("단색 화이트"), SYSTEM("시스템 설정"), AUTO("시간에 맞춰 자동"), DAWN("아침 노을"), DAY("한낮의 하늘"), SUNSET("저녁 노을"), NIGHT("밤");
+    val isFlat: Boolean get() = this == BLACK || this == WHITE || this == SYSTEM
 }
 
 data class SkyColors(val top: Int, val middle: Int, val bottom: Int)
@@ -19,7 +19,7 @@ object AmbientSky {
     fun colors(mode: BackgroundMode, minuteOfDay: Int): SkyColors {
         require(minuteOfDay in 0..1439)
         return when (mode) {
-            BackgroundMode.BLACK -> SkyColors(0xFF000000.toInt(), 0xFF000000.toInt(), 0xFF000000.toInt())
+            BackgroundMode.SYSTEM, BackgroundMode.BLACK -> SkyColors(0xFF000000.toInt(), 0xFF000000.toInt(), 0xFF000000.toInt())
             BackgroundMode.WHITE -> SkyColors(0xFFFFFFFF.toInt(), 0xFFFFFFFF.toInt(), 0xFFFFFFFF.toInt())
             BackgroundMode.DAWN -> dawn
             BackgroundMode.DAY -> day

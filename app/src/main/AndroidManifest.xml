@@ -10,6 +10,7 @@
     <uses-permission android:name="pleos.car.permission.CAR_CLIMATE" />
     <uses-permission android:name="pleos.car.permission.CONTROL_CAR_CLIMATE" />
     <uses-permission android:name="pleos.car.permission.CAR_SEATS" />
+    <uses-permission android:name="pleos.car.permission.CONTROL_CAR_SEATS" />
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
     <uses-permission android:name="android.car.permission.CAR_SPEED" />
     <uses-feature android:name="android.hardware.type.automotive" android:required="true" />

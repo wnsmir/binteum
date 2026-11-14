@@ -85,9 +85,12 @@ class ReminderDialView @JvmOverloads constructor(context: Context, attrs: Attrib
         paint.textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 52f, resources.displayMetrics)
         val available = radius * 1.6f
         if (paint.measureText(title) > available) paint.textSize *= available / paint.measureText(title)
-        canvas.drawText(title, cx, cy - (paint.ascent() + paint.descent()) / 2 - 8 * d, paint)
+        val titleBaseline = cy - (paint.ascent() + paint.descent()) / 2 - 8 * d
+        val titleBottom = titleBaseline + paint.descent()
+        canvas.drawText(title, cx, titleBaseline, paint)
         paint.color = palette.textMuted; paint.textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 22f, resources.displayMetrics)
-        canvas.drawText(subtitle, cx, cy + 37 * d, paint)
+        // Preserve a visible gap even at the default 130% text scale.
+        canvas.drawText(subtitle, cx, titleBottom + 16 * d - paint.ascent(), paint)
         if (isFocused) {
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2 * d; paint.color = palette.text
             canvas.drawCircle(cx, cy, radius + 18 * d, paint)

@@ -98,7 +98,7 @@ class AmbientBackgroundDrawable : Drawable() {
     override fun draw(canvas: Canvas) {
         if (mode.isFlat) {
             basePaint.shader = null
-            basePaint.color = if (mode == BackgroundMode.BLACK) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+            basePaint.color = if (mode == BackgroundMode.BLACK || (mode == BackgroundMode.SYSTEM && dark)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
             canvas.drawRect(bounds, basePaint)
             return
         }
