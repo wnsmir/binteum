@@ -682,7 +682,7 @@ class MainActivity : Activity() {
         setPadding(dp(4), dp(4), dp(4), dp(4))
         background = rounded(palette.surfaceAlt, 20)
         listOf(ThemeMode.LIGHT to AppIcon.SUN, ThemeMode.DARK to AppIcon.MOON).forEachIndexed { index, (mode, glyph) ->
-            val selected = (mode == ThemeMode.DARK) == palette.dark
+            val selected = backgroundMode.isFlat && (mode == ThemeMode.DARK) == palette.dark
             val description = getString(if (mode == ThemeMode.DARK) R.string.ui_text_080 else R.string.ui_text_079)
             val control = android.widget.ImageButton(this@MainActivity).apply {
                 tag = "theme-shortcut-${mode.name}"
@@ -1684,9 +1684,25 @@ class MainActivity : Activity() {
         val display = surfaceCard()
         display.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_077), AppIcon.SYSTEM))
         val themeNames = listOf(getString(com.binteum.app.R.string.ui_text_078), getString(com.binteum.app.R.string.ui_text_079), getString(com.binteum.app.R.string.ui_text_080))
+        val skyModes = BackgroundMode.entries.filterNot { it.isFlat }
+        val screenNames = themeNames + skyModes.map { backgroundTitle(it) }
+        val selectedScreen = if (backgroundMode.isFlat) themeMode.ordinal else themeNames.size + skyModes.indexOf(backgroundMode)
         display.addView(settingRow(getString(com.binteum.app.R.string.ui_text_081), getString(com.binteum.app.R.string.ui_text_082),
-            themeNames[themeMode.ordinal]) {
-            chooseSetting(getString(com.binteum.app.R.string.ui_text_081), themeNames, themeMode.ordinal) { changeTheme(ThemeMode.values()[it]) }
+            screenNames[selectedScreen]) {
+            chooseSetting(getString(com.binteum.app.R.string.ui_text_081), screenNames, selectedScreen) {
+                if (it < themeNames.size) changeTheme(ThemeMode.entries[it])
+                else {
+                    backgroundMode = skyModes[it - themeNames.size]
+                    prefs.edit().putString("backgroundMode", backgroundMode.name).apply()
+                    render(preserveScroll = true)
+                }
+            }
+        })
+        if (!backgroundMode.isFlat) display.addView(settingSwitch(getString(R.string.ui_text_090),
+            getString(R.string.ui_text_091), backgroundMotion) {
+            backgroundMotion = it
+            prefs.edit().putBoolean("backgroundMotion", it).apply()
+            ambientBackground.configure(backgroundMode, palette.dark, backgroundMotion)
         })
         display.addView(settingRow(getString(com.binteum.app.R.string.ui_text_083), getString(com.binteum.app.R.string.ui_text_084),
             if (panelOnRight) getString(com.binteum.app.R.string.ui_text_085) else getString(com.binteum.app.R.string.ui_text_086)) {
@@ -1737,24 +1753,6 @@ class MainActivity : Activity() {
             else android.widget.Toast.makeText(this, R.string.voice_test_blocked, android.widget.Toast.LENGTH_LONG).show()
         })
         cards.addView(voice)
-        val background = surfaceCard()
-        background.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_087), AppIcon.SUN))
-        background.addView(settingRow(getString(com.binteum.app.R.string.ui_text_088), getString(com.binteum.app.R.string.ui_text_089), backgroundTitle(backgroundMode)) {
-            val modes = BackgroundMode.entries.filterNot { it == BackgroundMode.BLACK || it == BackgroundMode.WHITE }
-            chooseSetting(getString(com.binteum.app.R.string.ui_text_088), modes.map { backgroundTitle(it) }, modes.indexOf(backgroundMode).coerceAtLeast(0)) {
-                backgroundMode = modes[it]
-                prefs.edit().putString("backgroundMode", backgroundMode.name).apply()
-                render(preserveScroll = true)
-            }
-        })
-        background.addView(settingSwitch(getString(com.binteum.app.R.string.ui_text_090),
-            getString(if (backgroundMode.isFlat) R.string.background_motion_locked else R.string.ui_text_091),
-            backgroundMotion && !backgroundMode.isFlat, enabled = !backgroundMode.isFlat) {
-            backgroundMotion = it
-            prefs.edit().putBoolean("backgroundMotion", it).apply()
-            ambientBackground.configure(backgroundMode, palette.dark, backgroundMotion)
-        })
-        cards.addView(background)
         val connection = surfaceCard()
         connectionCard = connection
         populateConnectionSettings(connection)
@@ -1963,7 +1961,7 @@ class MainActivity : Activity() {
     }
 
     private fun changeTheme(mode: ThemeMode) {
-        val nextBackground = if (backgroundMode.isFlat) BackgroundMode.SYSTEM else backgroundMode
+        val nextBackground = BackgroundMode.SYSTEM
         if (mode == themeMode && nextBackground == backgroundMode) return
         themeMode = mode
         backgroundMode = nextBackground

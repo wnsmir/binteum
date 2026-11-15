@@ -17,7 +17,7 @@
     <string name="text_default">"Normal (100%)"</string>
     <string name="text_large">"Large (115%)"</string>
     <string name="text_largest">"Extra large (130%, default)"</string>
-    <string name="sky_auto">"Automatic"</string>
+    <string name="sky_auto">"Automatic sky (time of day)"</string>
     <string name="sky_dawn">"Sunrise"</string>
     <string name="sky_day">"Daytime sky"</string>
     <string name="sky_sunset">"Sunset"</string>

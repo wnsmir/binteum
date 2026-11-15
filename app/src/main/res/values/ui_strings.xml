@@ -53,7 +53,7 @@
     <string name="ui_text_079">"라이트"</string>
     <string name="ui_text_080">"다크"</string>
     <string name="ui_text_081">"화면 모드"</string>
-    <string name="ui_text_082">"앱 전체에 라이트·다크 모드를 적용합니다. 시스템을 선택하면 차량의 화면 모드를 따릅니다."</string>
+    <string name="ui_text_082">"라이트·다크 또는 노을·하늘을 선택합니다. 시스템은 차량 화면 모드, 자동 하늘은 시간에 따라 바뀝니다."</string>
     <string name="ui_text_083">"조작 패널 위치"</string>
     <string name="ui_text_084">"다이얼과 메뉴를 왼쪽 또는 오른쪽에 배치합니다."</string>
     <string name="ui_text_085">"오른쪽"</string>

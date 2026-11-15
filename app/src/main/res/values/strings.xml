@@ -16,7 +16,7 @@
     <string name="text_default">"보통 (100%)"</string>
     <string name="text_large">"크게 (115%)"</string>
     <string name="text_largest">"아주 크게 (130%, 기본)"</string>
-    <string name="sky_auto">"시간에 맞춰 자동"</string>
+    <string name="sky_auto">"자동 하늘 (시간에 맞춰)"</string>
     <string name="sky_dawn">"아침 노을"</string>
     <string name="sky_day">"한낮의 하늘"</string>
     <string name="sky_sunset">"저녁 노을"</string>

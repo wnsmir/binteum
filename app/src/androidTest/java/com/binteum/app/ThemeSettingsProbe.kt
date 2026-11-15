@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.ScrollView
+import android.widget.TextView
 import com.binteum.app.ui.AmbientBackgroundDrawable
 import com.binteum.app.ui.AppPalette
 import com.binteum.app.ui.AppTheme
@@ -122,24 +123,60 @@ class ThemeSettingsProbe : Instrumentation() {
             }
             settle()
         }
-        fun selectMode(mode: ThemeMode) {
+        val skyChoices = listOf(BackgroundMode.AUTO, BackgroundMode.DAWN, BackgroundMode.DAY,
+            BackgroundMode.SUNSET, BackgroundMode.NIGHT)
+        fun modeTitle(mode: ThemeMode) = app!!.getString(when (mode) {
+            ThemeMode.SYSTEM -> R.string.ui_text_078
+            ThemeMode.LIGHT -> R.string.ui_text_079
+            ThemeMode.DARK -> R.string.ui_text_080
+        })
+        fun skyTitle(mode: BackgroundMode) = app!!.getString(when (mode) {
+            BackgroundMode.AUTO -> R.string.sky_auto
+            BackgroundMode.DAWN -> R.string.sky_dawn
+            BackgroundMode.DAY -> R.string.sky_day
+            BackgroundMode.SUNSET -> R.string.sky_sunset
+            BackgroundMode.NIGHT -> R.string.sky_night
+            else -> error("Not a sky choice: $mode")
+        })
+        fun appearanceRow() = descendants(root()).single {
+            it.transitionName == "setting-row:${app!!.getString(R.string.ui_text_081)}"
+        }
+        fun checkSettingsStructure(expectedLabel: String, gradient: Boolean) {
+            val views = descendants(root())
+            val screen = appearanceRow()
+            val control = descendants(screen).filterIsInstance<Button>().single()
+            verify(control.contentDescription.toString() == "${app!!.getString(R.string.ui_text_081)}, $expectedLabel",
+                "screen mode row names the selected appearance: $expectedLabel")
+            verify(views.none { it.transitionName == "setting-row:${app!!.getString(R.string.ui_text_088)}" } &&
+                views.filterIsInstance<TextView>().none { it.text.toString() == app!!.getString(R.string.ui_text_087) },
+                "separate background style row and card are absent")
+            val motion = views.filter { it.transitionName == "setting-switch:${app!!.getString(R.string.ui_text_090)}" }
+            verify(if (gradient) motion.size == 1 && motion.single().visibility == View.VISIBLE else motion.isEmpty(),
+                "background motion appears only for a sky choice")
+            if (gradient) {
+                val parent = screen.parent as ViewGroup
+                verify(motion.single().parent === parent && parent.indexOfChild(motion.single()) == parent.indexOfChild(screen) + 1,
+                    "background motion is immediately below screen mode")
+            }
+        }
+        fun selectChoice(name: String) {
             runOnMainSync {
-                val title = app!!.getString(R.string.ui_text_081)
-                val row = descendants(root()).single { it.transitionName == "setting-row:$title" }
-                descendants(row).filterIsInstance<Button>().single().performClick()
+                descendants(appearanceRow()).filterIsInstance<Button>().single().performClick()
                 val dialog = get("transientDialog") as Dialog
                 verify(dialog.isShowing, "appearance button opens real chooser")
-                val name = app!!.getString(when (mode) {
-                    ThemeMode.SYSTEM -> R.string.ui_text_078
-                    ThemeMode.LIGHT -> R.string.ui_text_079
-                    ThemeMode.DARK -> R.string.ui_text_080
-                })
+                val expected = ThemeMode.entries.map(::modeTitle) + skyChoices.map(::skyTitle)
+                val offered = descendants(dialog.window!!.decorView)
+                    .filter { it.isClickable && it.contentDescription?.toString() in expected }
+                    .map { it.contentDescription.toString() }
+                verify(offered.size == 8 && offered.toSet() == expected.toSet(),
+                    "single screen mode chooser contains three flat modes and all five skies")
                 val option = descendants(dialog.window!!.decorView).single { it.isClickable && it.contentDescription?.toString() == name }
                 option.performClick()
                 verify(!dialog.isShowing, "selecting mode closes chooser")
             }
             settle()
         }
+        fun selectMode(mode: ThemeMode) = selectChoice(modeTitle(mode))
         val evidence = File(targetContext.filesDir, "theme-evidence").apply { mkdirs() }
         fun capture(name: String) {
             val done = CountDownLatch(1)
@@ -208,6 +245,7 @@ class ThemeSettingsProbe : Instrumentation() {
                 capture(if (mode == ThemeMode.DARK) "dark-home-shortcuts" else "light-home-shortcuts")
             }
             openSettings()
+            runOnMainSync { checkSettingsStructure(modeTitle(ThemeMode.DARK), false) }
             val media = get("media")
             val plan = get("waitingPlan")
             var previousScroll = 0
@@ -233,6 +271,58 @@ class ThemeSettingsProbe : Instrumentation() {
                             "highlighted quick control exits system mode into an explicit choice")
                     }
                     settle()
+                }
+            }
+            val retainedTheme = get("themeMode") as ThemeMode
+            for (sky in skyChoices) {
+                selectChoice(skyTitle(sky))
+                runOnMainSync {
+                    verify(get("backgroundMode") == sky && preferences.getString("backgroundMode", null) == sky.name,
+                        "$sky choice applies and persists its background")
+                    verify(get("themeMode") == retainedTheme && preferences.getString("themeMode", null) == retainedTheme.name,
+                        "$sky retains the existing tint preference")
+                    verify(!(get("palette") as AppPalette).flat,
+                        "$sky uses the gradient palette")
+                    verify(listOf("LIGHT", "DARK").all { name ->
+                        !descendants(root()).single { it.tag == "theme-shortcut-$name" }.isSelected
+                    }, "$sky does not highlight either flat-mode shortcut")
+                    verify(get("media") === media && get("waitingPlan") === plan &&
+                        (get("contentScroll") as ScrollView).scrollY == previousScroll,
+                        "$sky retains media, timer and settings scroll")
+                    checkSettingsStructure(skyTitle(sky), true)
+                }
+            }
+            selectChoice(skyTitle(BackgroundMode.SUNSET))
+            freshActivity()
+            runOnMainSync {
+                verify(get("backgroundMode") == BackgroundMode.SUNSET && get("themeMode") == retainedTheme &&
+                    !(get("palette") as AppPalette).flat, "fresh Activity reloads the selected sunset appearance")
+            }
+            openSettings()
+            runOnMainSync { checkSettingsStructure(skyTitle(BackgroundMode.SUNSET), true) }
+            capture("sunset-settings")
+            for (mode in listOf(ThemeMode.LIGHT, ThemeMode.DARK)) {
+                selectMode(mode)
+                selectChoice(skyTitle(BackgroundMode.SUNSET))
+                val gradientMedia = get("media")
+                val gradientPlan = get("waitingPlan")
+                var gradientScroll = 0
+                runOnMainSync {
+                    (get("contentScroll") as ScrollView).scrollTo(0, 100)
+                    gradientScroll = (get("contentScroll") as ScrollView).scrollY
+                    descendants(root()).single { it.tag == "theme-shortcut-${mode.name}" }.performClick()
+                }
+                settle()
+                runOnMainSync {
+                    checkAppearance(mode == ThemeMode.DARK, "$mode shortcut replaces sky with a flat mode")
+                    verify(get("backgroundMode") == BackgroundMode.SYSTEM &&
+                        preferences.getString("backgroundMode", null) == "SYSTEM" &&
+                        preferences.getString("themeMode", null) == mode.name,
+                        "$mode shortcut resets and persists the flat background even when tint already matches")
+                    verify(get("tab") == 2 && get("media") === gradientMedia && get("waitingPlan") === gradientPlan &&
+                        (get("contentScroll") as ScrollView).scrollY == gradientScroll,
+                        "$mode shortcut from a sky retains screen, media, timer and scroll")
+                    checkSettingsStructure(modeTitle(mode), false)
                 }
             }
             selectMode(ThemeMode.DARK)
@@ -272,7 +362,7 @@ class ThemeSettingsProbe : Instrumentation() {
             if (!restored) { result = Activity.RESULT_CANCELED; report.putString("failure", "Could not restore appearance preferences") }
         }
         report.putInt("checks", checks)
-        report.putString("result", if (result == Activity.RESULT_OK) "PASS: real settings mode changes, rendering, persistence and legacy migration" else "FAIL")
+        report.putString("result", if (result == Activity.RESULT_OK) "PASS: unified appearance choices, quick controls, rendering, persistence and legacy migration" else "FAIL")
         report.putString("evidence", evidence.absolutePath)
         report.putString("scope", "SIMULATED_VEHICLE_AND_TIMER; no media playback/location/vehicle commands; fresh Activity loads, not OS process death")
         finish(result, report)
