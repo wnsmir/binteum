@@ -667,9 +667,53 @@ class MainActivity : Activity() {
         configureWaitDial()
         estimateSourceLabel = label("", 19f).apply { gravity = Gravity.CENTER; setTextColor(muted) }.also { addView(it) }
         addView(View(this@MainActivity).apply { minimumHeight = dp(28) }, LinearLayout.LayoutParams(1, 0, 1f))
+        addView(buildThemeShortcuts(), LinearLayout.LayoutParams(dp(164), dp(72)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(4)
+        })
         addView(button(if (tab == 2) getString(R.string.settings_apply) else tx("설정", "Settings")) {
             if (tab == 2) goBack() else navigateTo(2)
         }.apply { gravity = Gravity.CENTER })
+    }
+
+    private fun buildThemeShortcuts() = row().apply {
+        tag = "theme-shortcuts"
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), dp(4), dp(4), dp(4))
+        background = rounded(palette.surfaceAlt, 20)
+        listOf(ThemeMode.LIGHT to AppIcon.SUN, ThemeMode.DARK to AppIcon.MOON).forEachIndexed { index, (mode, glyph) ->
+            val selected = (mode == ThemeMode.DARK) == palette.dark
+            val description = getString(if (mode == ThemeMode.DARK) R.string.ui_text_080 else R.string.ui_text_079)
+            val control = android.widget.ImageButton(this@MainActivity).apply {
+                tag = "theme-shortcut-${mode.name}"
+                contentDescription = description
+                tooltipText = description
+                isSelected = selected
+                isFocusable = true
+                setPadding(dp(18), dp(18), dp(18), dp(18))
+                val selectedInk = if (android.graphics.Color.luminance(ink) > .5f)
+                    android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                setImageDrawable(IconDrawable(glyph, if (selected) selectedInk else ink, dp(28)))
+                scaleType = ImageView.ScaleType.CENTER
+                val states = android.graphics.drawable.StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_focused),
+                        rounded(if (selected) ink else palette.surfaceAlt, 16, ink).apply { setStroke(dp(2), ink) })
+                    addState(intArrayOf(), rounded(if (selected) ink else android.graphics.Color.TRANSPARENT, 16))
+                }
+                background = RippleDrawable(ColorStateList.valueOf(palette.border), states, null)
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = "android.widget.RadioButton"
+                        info.isCheckable = true; info.isChecked = selected
+                    }
+                }
+                setOnClickListener { changeTheme(mode) }
+            }
+            addView(control, LinearLayout.LayoutParams(0, -1, 1f).apply {
+                if (index > 0) marginStart = dp(4)
+            })
+        }
     }
 
     private fun chooseChargeTarget() {

@@ -109,6 +109,9 @@ class ThemeSettingsProbe : Instrumentation() {
             } finally { bitmap.recycle() }
             verify(if (dark) Color.luminance(palette.text) > .8f else Color.luminance(palette.text) < .1f,
                 "$description foreground contrast")
+            verify(descendants(root()).single { it.tag == "theme-shortcut-DARK" }.isSelected == dark &&
+                descendants(root()).single { it.tag == "theme-shortcut-LIGHT" }.isSelected != dark,
+                "$description quick controls reflect the visible mode")
         }
         fun openSettings() {
             runOnMainSync {
@@ -184,6 +187,26 @@ class ThemeSettingsProbe : Instrumentation() {
             stage("DARK", null)
             freshActivity()
             runOnMainSync { checkAppearance(true, "saved DARK with default background") }
+            val homeMedia = get("media")
+            val homePlan = get("waitingPlan")
+            for (mode in listOf(ThemeMode.LIGHT, ThemeMode.DARK)) {
+                runOnMainSync {
+                    val shortcut = descendants(root()).single { it.tag == "theme-shortcut-${mode.name}" }
+                    verify(shortcut.width >= 48 && shortcut.height >= 48 && shortcut.contentDescription.isNotBlank(),
+                        "$mode shortcut has a labeled touch target")
+                    shortcut.performClick()
+                }
+                settle()
+                runOnMainSync {
+                    checkAppearance(mode == ThemeMode.DARK, "home shortcut $mode")
+                    verify(get("tab") == 0 && (get("transientDialog") as? Dialog)?.isShowing != true,
+                        "$mode shortcut works outside settings without a dialog")
+                    verify(get("media") === homeMedia && get("waitingPlan") === homePlan,
+                        "$mode shortcut retains media and timer")
+                    verify(preferences.getString("themeMode", null) == mode.name, "$mode shortcut persists selection")
+                }
+                capture(if (mode == ThemeMode.DARK) "dark-home-shortcuts" else "light-home-shortcuts")
+            }
             openSettings()
             val media = get("media")
             val plan = get("waitingPlan")
@@ -202,6 +225,15 @@ class ThemeSettingsProbe : Instrumentation() {
                     verify((get("contentScroll") as ScrollView).scrollY == previousScroll, "$mode retains settings scroll")
                 }
                 if (mode != ThemeMode.SYSTEM) capture(if (mode == ThemeMode.DARK) "dark-settings" else "light-settings")
+                else {
+                    runOnMainSync {
+                        val visibleMode = if ((get("palette") as AppPalette).dark) ThemeMode.DARK else ThemeMode.LIGHT
+                        descendants(root()).single { it.tag == "theme-shortcut-${visibleMode.name}" }.performClick()
+                        verify(get("themeMode") == visibleMode && preferences.getString("themeMode", null) == visibleMode.name,
+                            "highlighted quick control exits system mode into an explicit choice")
+                    }
+                    settle()
+                }
             }
             selectMode(ThemeMode.DARK)
             freshActivity()
