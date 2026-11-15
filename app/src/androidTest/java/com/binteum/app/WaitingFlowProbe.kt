@@ -45,6 +45,28 @@ class WaitingFlowProbe : Instrumentation() {
                 verify(dock.background is DockBackdrop, "sampled blur backdrop")
                 verify((0 until dock.childCount).all { dock.getChildAt(it).background == null }, "borderless dock rows")
                 verify(descendants(get("leftScroll") as View).none { it is SectionDockView }, "no sidebar contents list")
+                fun videoSection() = (get("sectionAnchors") as Map<*, *>)[1] as View
+                fun videoControl(tag: String) = descendants(videoSection()).single { it.tag == tag }
+                val videoHeader = videoControl("video-header") as android.widget.LinearLayout
+                verify(videoHeader.orientation == android.widget.LinearLayout.HORIZONTAL &&
+                    descendants(videoHeader).count { it.tag in listOf("video-open-YOUTUBE", "video-open-NETFLIX") } == 2,
+                    "both service links share the video heading row")
+                verify((videoControl("video-selectors") as android.widget.LinearLayout).orientation == android.widget.LinearLayout.HORIZONTAL,
+                    "video providers are horizontal choices")
+                val videoPanel = get("media") as com.binteum.app.media.WebMediaPanel
+                verify(descendants(videoSection()).any { it === videoPanel }, "YouTube choices shown by default")
+                videoControl("video-select-NETFLIX").performClick()
+                verify(get("videoProvider") == com.binteum.app.media.VideoProvider.NETFLIX && videoPanel.parent == null,
+                    "Netflix selection detaches inline YouTube")
+                val videoGate = videoPanel.javaClass.getDeclaredField("playbackAllowed").apply { isAccessible = true }
+                verify(!videoGate.getBoolean(videoPanel) && !videoPanel.hasOpenContent, "hidden YouTube cannot play")
+                verify(videoControl("netflix-preview").isShown, "Netflix shows service handoff information")
+                render()
+                verify(get("videoProvider") == com.binteum.app.media.VideoProvider.NETFLIX && videoPanel.parent == null,
+                    "rebuild retains selected video provider")
+                videoControl("video-select-YOUTUBE").performClick()
+                verify(videoPanel.parent != null && videoGate.getBoolean(videoPanel) && !videoPanel.hasOpenContent,
+                    "returning to YouTube restores choices without autoplay")
                 call("showWaitSettings")
                 val timerDialog = get("transientDialog") as android.app.Dialog
                 verify(timerDialog.isShowing && descendants(timerDialog.window!!.decorView).any { it is ReminderDialView }, "expanded timer modal")

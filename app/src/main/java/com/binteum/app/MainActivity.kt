@@ -28,6 +28,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.binteum.app.media.WebMediaPanel
+import com.binteum.app.media.VideoProvider
+import com.binteum.app.media.VideoProviderIcon
+import com.binteum.app.media.VideoLinks
+import com.binteum.app.media.VideoLauncher
+import com.binteum.app.media.VideoOpenResult
 import com.binteum.app.vehicle.PleosVehicleDataSource
 import com.binteum.app.vehicle.ComfortController
 import com.binteum.app.vehicle.SeatMemoryStatus
@@ -56,6 +61,7 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("tab", tab)
+        outState.putString("videoProvider", videoProvider.name)
         outState.putIntArray("screenHistory", screenHistory.toIntArray())
         outState.putInt("activityReturnScroll", activityReturnScroll)
         outState.putBoolean("targetMode", targetMode)
@@ -112,6 +118,7 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("binteum_experience", MODE_PRIVATE) }
     private lateinit var source: VehicleDataSource
     private lateinit var media: WebMediaPanel
+    private var videoProvider = VideoProvider.YOUTUBE
     private var waitingPlan: WaitingPlan? = null
     private var targetMode = false
     private var waitMinutes = 20
@@ -237,6 +244,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tab = canonicalTab(savedInstanceState?.getInt("tab", 0) ?: 0)
+        videoProvider = VideoProvider.entries.firstOrNull { it.name == savedInstanceState?.getString("videoProvider") }
+            ?: VideoProvider.YOUTUBE
         savedInstanceState?.getIntArray("screenHistory")?.filter { it in 0..6 }?.map(::canonicalTab)
             ?.takeLast(16)?.forEach { if (screenHistory.lastOrNull() != it) screenHistory.addLast(it) }
         while (screenHistory.lastOrNull() == tab) screenHistory.removeLast()
@@ -275,7 +284,7 @@ class MainActivity : Activity() {
                 android.widget.Toast.LENGTH_LONG).show() })
         media = WebMediaPanel(this)
         media.setBrowseMode(false)
-        media.onContentOpen = { nap == null && tab == 0 && allowed() && active == null && recovery == null }
+        media.onContentOpen = { videoProvider == VideoProvider.YOUTUBE && nap == null && tab == 0 && allowed() && active == null && recovery == null }
         media.onVideoSelected = {
             recordChoice(UsageCategory.VIDEO, pendingVideoEntry)
             pendingVideoEntry = UsageEntryPoint.MANUAL
@@ -429,7 +438,7 @@ class MainActivity : Activity() {
     private fun refreshMediaGate() {
         media.setBrowseMode(true)
         media.updateRecommendations(recommendationSeconds())
-        media.setPlaybackAllowed(nap == null && tab == 0 && allowed() && active == null && recovery == null && completed == null, statusText())
+        media.setPlaybackAllowed(videoProvider == VideoProvider.YOUTUBE && nap == null && tab == 0 && allowed() && active == null && recovery == null && completed == null, statusText())
     }
     private fun remainingWindowSeconds(): Int = recommendationSeconds() ?: Int.MAX_VALUE
     private fun windowContentKey(): String = listOf(allowed(), chargeEstimate().source, target,
@@ -466,7 +475,7 @@ class MainActivity : Activity() {
         val previousLeftScroll = scrollRestore?.first ?: if (preserveScroll) leftScroll?.scrollY ?: 0 else 0
         val previousContentScroll = scrollRestore?.second ?: if (preserveScroll) contentScroll?.scrollY ?: 0 else 0
         lastWindowContentKey = windowContentKey()
-        val preserveMedia = tab == 0 && allowed() && active == null && recovery == null && completed == null
+        val preserveMedia = videoProvider == VideoProvider.YOUTUBE && tab == 0 && allowed() && active == null && recovery == null && completed == null
         if (preserveMedia) media.beginHostReparent()
         try {
             (media.parent as? ViewGroup)?.removeView(media)
@@ -987,10 +996,61 @@ class MainActivity : Activity() {
         addCardGrid(parent, 280, width, 1).addView(content)
     }
     private fun buildMedia(parent: LinearLayout) {
-        parent.addView(label(tx("영상", "Videos"), 32f, true))
-        parent.addView(media)
-        addCardGrid(parent).addView(choiceCard("Netflix", tx("외부 앱 또는 웹으로 열어요. 로그인·멤버십·기기 지원이 필요하며, 외부 재생은 이 앱에서 제어할 수 없어요.",
-            "Opens an external app or browser. Login, membership and device support are required; playback is outside this app's control."), AppIcon.PLAY) { openNetflix() })
+        val heading = row().apply { gravity = Gravity.CENTER_VERTICAL; tag = "video-header" }
+        heading.addView(label(tx("영상", "Videos"), 32f, true), LinearLayout.LayoutParams(-2, -2))
+        val actions = row().apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        VideoProvider.entries.forEach { provider ->
+            actions.addView(button(tx("${provider.displayName}로 이동 ↗", "Open ${provider.displayName} ↗")) {
+                openVideoService(provider)
+            }.apply {
+                tag = "video-open-${provider.name}"
+                textSize = 18f; minHeight = dp(56); minimumHeight = dp(56); setSingleLine(true)
+                background = RippleDrawable(ColorStateList.valueOf(palette.border), rounded(palette.surfaceAlt, 16), null)
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
+        }
+        // Both service links stay on the title row; a very narrow window can pan the actions.
+        heading.addView(android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; isFillViewport = true; addView(actions)
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(16) })
+        parent.addView(heading, LinearLayout.LayoutParams(-1, -2))
+
+        val selectors = row().apply { tag = "video-selectors" }
+        VideoProvider.entries.forEach { provider ->
+            val selected = provider == videoProvider
+            selectors.addView(button(provider.displayName) { selectVideoProvider(provider) }.apply {
+                tag = "video-select-${provider.name}"
+                textSize = 22f; isSelected = selected
+                contentDescription = provider.displayName + if (selected) tx(" 선택됨", " selected") else ""
+                if (Build.VERSION.SDK_INT >= 30) stateDescription = if (selected) tx("선택됨", "Selected") else null
+                val brand = VideoProviderIcon.load(this@MainActivity, provider)
+                brand.setBounds(0, 0, dp(32), dp(32))
+                setCompoundDrawablesRelative(brand, null, null, null); compoundDrawablePadding = dp(12)
+                background = RippleDrawable(ColorStateList.valueOf(palette.border),
+                    rounded(if (selected) palette.surfaceAlt else palette.surface, 18, if (selected) ink else palette.border), null)
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(12) })
+        }
+        parent.addView(android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; addView(selectors)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18); bottomMargin = dp(14) })
+
+        if (videoProvider == VideoProvider.YOUTUBE) {
+            parent.addView(media)
+        } else {
+            val content = surfaceCard().apply { tag = "netflix-preview" }
+            content.addView(label(tx("Netflix에서 이어 보세요", "Continue watching on Netflix"), 27f, true))
+            content.addView(label(tx("위의 ‘Netflix로 이동’을 눌러 앱이나 브라우저에서 작품을 골라보세요. 이 기기에서 열 수 없으면 휴대폰 QR을 제공해요.",
+                "Use ‘Open Netflix’ above to choose a title in the app or browser. A phone QR is available if this device cannot open it."), 21f))
+            content.addView(label(tx("Netflix 로그인과 멤버십이 필요해요. 재생은 Netflix에서 관리합니다.",
+                "Netflix sign-in and membership are required. Netflix manages playback."), 18f).apply { setTextColor(muted) })
+            addCardGrid(parent, 280, 720, 1).addView(content)
+        }
+    }
+
+    private fun selectVideoProvider(provider: VideoProvider) {
+        if (!allowed() || videoProvider == provider) return
+        media.pauseForHost()
+        videoProvider = provider
+        render(preserveScroll = true)
     }
 
     private fun isEnglish() = resources.configuration.locales[0].language == "en"
@@ -1062,6 +1122,11 @@ class MainActivity : Activity() {
     private fun showMusicHandoff(provider: MusicProvider, mood: MusicMood?) {
         if (!allowed()) return
         val uri = mood?.let { MusicLinks.search(provider, it) } ?: MusicLinks.home(provider)
+        showServiceHandoff(uri, provider.displayName, tx("음악 서비스 QR", "Music service QR"))
+    }
+
+    private fun showServiceHandoff(uri: Uri, title: String, qrDescription: String) {
+        if (!allowed()) return
         val content = column().apply { setPadding(dp(24), dp(16), dp(24), dp(16)) }
         content.addView(label(tx("이 차량에는 서비스를 여는 앱·브라우저가 없어요. 휴대폰으로 이어서 열 수 있어요.",
             "No compatible app or browser is installed here. Continue on your phone."), 22f))
@@ -1071,10 +1136,11 @@ class MainActivity : Activity() {
             android.graphics.Bitmap.createBitmap(IntArray(480 * 480) { if (bits[it % 480, it / 480]) android.graphics.Color.BLACK else android.graphics.Color.WHITE },
                 480, 480, android.graphics.Bitmap.Config.ARGB_8888)
         }.getOrNull()
-        bitmap?.let { content.addView(ImageView(this).apply { setImageBitmap(it); contentDescription = tx("음악 서비스 QR", "Music service QR") },
+        bitmap?.let { content.addView(ImageView(this).apply { setImageBitmap(it); contentDescription = qrDescription },
             LinearLayout.LayoutParams(dp(250), dp(250)).apply { gravity = Gravity.CENTER_HORIZONTAL }) }
         content.addView(label(uri.toString(), 17f))
-        transientDialog = AlertDialog.Builder(this, dialogTheme()).setTitle(provider.displayName).setView(content)
+        transientDialog?.dismiss()
+        transientDialog = AlertDialog.Builder(this, dialogTheme()).setTitle(title).setView(content)
             .setPositiveButton(tx("닫기", "Close"), null).show()
     }
 
@@ -1494,30 +1560,16 @@ class MainActivity : Activity() {
         usageStore.save(updated); usageRecords = UsagePreferences.record(usageRecords, updated, 4000)
     }
 
-    private fun openNetflix() {
+    private fun openVideoService(provider: VideoProvider) {
         if (!allowed()) return
-        recordChoice(UsageCategory.EXTERNAL_MEDIA, UsageEntryPoint.MANUAL)
-        media.pauseForHost()
-        val uri = Uri.parse("https://www.netflix.com/")
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri).apply {
-                addCategory(Intent.CATEGORY_BROWSABLE)
-                setPackage("com.netflix.mediaclient")
-            })
-        } catch (_: android.content.ActivityNotFoundException) {
-            openNetflixWeb(uri)
-        } catch (_: SecurityException) {
-            openNetflixWeb(uri)
+        media.pauseForHost(); napChime.stop(); completionVoice.stop()
+        val result = VideoLauncher(this) { allowed() }.open(provider)
+        if (result.opened || result == VideoOpenResult.NO_HANDLER) {
+            recordChoice(UsageCategory.EXTERNAL_MEDIA, UsageEntryPoint.MANUAL)
         }
-    }
-
-    private fun openNetflixWeb(uri: Uri) {
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
-        } catch (_: android.content.ActivityNotFoundException) {
-            android.widget.Toast.makeText(this, R.string.netflix_unavailable, android.widget.Toast.LENGTH_LONG).show()
-        } catch (_: SecurityException) {
-            android.widget.Toast.makeText(this, R.string.netflix_unavailable, android.widget.Toast.LENGTH_LONG).show()
+        if (result == VideoOpenResult.NO_HANDLER) {
+            showServiceHandoff(VideoLinks.home(provider), provider.displayName,
+                tx("${provider.displayName} 연결 QR", "${provider.displayName} link QR"))
         }
     }
 

@@ -14,8 +14,10 @@
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
     <uses-permission android:name="android.car.permission.CAR_SPEED" />
     <uses-feature android:name="android.hardware.type.automotive" android:required="true" />
-    <!-- Only music providers and account-capable browser intent handlers are inspected. -->
+    <!-- Only supported media providers and account-capable browser intent handlers are inspected. -->
     <queries>
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.netflix.mediaclient" />
         <package android:name="com.google.android.apps.youtube.music" />
         <package android:name="com.apple.android.music" />
         <package android:name="com.spotify.music" />
