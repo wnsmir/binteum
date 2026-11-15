@@ -328,6 +328,8 @@ adb -s "$WAITING_SERIAL" shell am instrument --user "$WAITING_USER" -w com.binte
 
 기대 값: `permissionGranted=true`, `locationResult=FRESH_SDK_FIX`, `result=PASS`. 장소 개수·도보 경로는 실제 공급자 응답에 따라 달라질 수 있습니다. 검사 후 앱은 3절의 `am start` 명령으로 다시 엽니다.
 
+이미 설정된 에뮬레이터 위치를 변경하지 않고 진단하려면 위 `am instrument` 명령의 `-w` 뒤에 `-e useCurrentEmulatorLocation true`를 추가합니다. 해당 위치로 주변 검색을 수행하는 옵션이므로 위치 사용에 동의한 개발 환경에서만 실행하세요. 권한을 자동 부여하거나 GPS를 바꾸지 않습니다. `coverage=OUTSIDE_COVERAGE` 및 `NO_PLACE_RECOMMENDATIONS`는 위치·검색 응답은 정상이지만 추천 장소가 없다는 뜻이며, 카페·도보 경로 검증 완료와 구분합니다.
+
 ### 2026-11-14 이 Mac에서 확인한 결과
 
 | 검사 | 결과와 범위 |
