@@ -545,12 +545,13 @@ class MainActivity : Activity() {
             val position = IntArray(2); it.getLocationOnScreen(position); position[0]
         }
         val previousPanelX = screenX(leftScroll)
-        val previousContentX = screenX(contentScroll)
+        fun contentHost(): View? = (contentScroll?.parent as? DockContentLayout) ?: contentScroll
+        val previousContentX = screenX(contentHost())
         panelOnRight = toRight
         prefs.edit().putBoolean("panelOnRight", toRight).apply()
         render(preserveScroll = true)
         if (!android.animation.ValueAnimator.areAnimatorsEnabled() || leftScroll == null) return
-        listOf(leftScroll to previousPanelX, contentScroll to previousContentX).forEach { (view, oldX) ->
+        listOf(leftScroll to previousPanelX, contentHost() to previousContentX).forEach { (view, oldX) ->
             if (view != null && oldX != null) view.post {
                 if (view.isAttachedToWindow) {
                     val nextX = screenX(view) ?: oldX
@@ -564,7 +565,6 @@ class MainActivity : Activity() {
 
     private fun withSectionDock(scroll: ScrollView): View {
         if (tab == 2 || sectionAnchors.isEmpty()) return scroll
-        scroll.setPadding(if (tocOnRight) 0 else dp(82), 0, if (tocOnRight) dp(82) else 0, 0)
         val frame = DockContentLayout(this)
         frame.addView(scroll, FrameLayout.LayoutParams(-1, -1))
         val dock = SectionDockView(this, palette, tocOnRight, listOf(

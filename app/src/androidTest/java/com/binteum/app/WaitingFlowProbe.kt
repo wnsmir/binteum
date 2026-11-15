@@ -43,7 +43,7 @@ class WaitingFlowProbe : Instrumentation() {
                 val dock = get("sectionDock") as SectionDockView
                 verify(dock.parent === (get("contentScroll") as View).parent, "dock is on content side")
                 verify(dock.background is DockBackdrop, "sampled blur backdrop")
-                verify((0 until dock.childCount).all { dock.getChildAt(it).background == null }, "borderless dock rows")
+                verify(descendants(dock).filterIsInstance<android.widget.TextView>().all { it.alpha == 1f }, "navigation labels are always visible")
                 verify(descendants(get("leftScroll") as View).none { it is SectionDockView }, "no sidebar contents list")
                 fun videoSection() = (get("sectionAnchors") as Map<*, *>)[1] as View
                 fun videoControl(tag: String) = descendants(videoSection()).single { it.tag == tag }

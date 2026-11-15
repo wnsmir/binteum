@@ -3,6 +3,7 @@ package com.binteum.app.ui
 import android.graphics.*
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 
@@ -92,9 +93,50 @@ class DockBackdrop : Drawable() {
     }
 }
 
-/** Draw content once, then replay its GPU display list beneath the dock blur. */
+/** Separate content and navigation bounds; the rail never covers content or its touch targets. */
 class DockContentLayout(context: android.content.Context) : FrameLayout(context) {
     private var contentNode: Any? = null
+    private var measuredDock: SectionDockView? = null
+    private var expandedDockWidth = 0
+    private val gap get() = (8 * resources.displayMetrics.density).toInt()
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val source = getChildAt(0)
+        val dock = getChildAt(1) as? SectionDockView
+        if (source == null || dock == null) { super.onMeasure(widthMeasureSpec, heightMeasureSpec); return }
+        val width = MeasureSpec.getSize(widthMeasureSpec)
+        val height = MeasureSpec.getSize(heightMeasureSpec)
+        val availableWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+        val availableHeight = (height - paddingTop - paddingBottom).coerceAtLeast(0)
+        val dockHeightSpec = MeasureSpec.makeMeasureSpec(availableHeight, MeasureSpec.AT_MOST)
+        if (measuredDock !== dock) {
+            dock.setCompact(false)
+            dock.measure(MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED), dockHeightSpec)
+            expandedDockWidth = dock.measuredWidth
+            measuredDock = dock
+        }
+        val readingWidth = (960 * resources.displayMetrics.density * resources.configuration.fontScale.coerceAtLeast(1f)).toInt()
+        dock.setCompact(availableWidth - expandedDockWidth - gap < readingWidth)
+        dock.measure(MeasureSpec.makeMeasureSpec(availableWidth, MeasureSpec.AT_MOST), dockHeightSpec)
+        val sourceWidth = (availableWidth - dock.measuredWidth - gap).coerceAtLeast(0)
+        source.measure(MeasureSpec.makeMeasureSpec(sourceWidth, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(availableHeight, MeasureSpec.EXACTLY))
+        setMeasuredDimension(resolveSize(width, widthMeasureSpec), resolveSize(height, heightMeasureSpec))
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val source = getChildAt(0)
+        val dock = getChildAt(1) as? SectionDockView
+        if (source == null || dock == null) { super.onLayout(changed, left, top, right, bottom); return }
+        val gravity = (dock.layoutParams as LayoutParams).gravity
+        val onRight = Gravity.getAbsoluteGravity(gravity, layoutDirection) and Gravity.HORIZONTAL_GRAVITY_MASK == Gravity.RIGHT
+        val dockLeft = if (onRight) width - paddingRight - dock.measuredWidth else paddingLeft
+        val sourceLeft = if (onRight) paddingLeft else paddingLeft + dock.measuredWidth + gap
+        val dockTop = paddingTop + ((height - paddingTop - paddingBottom - dock.measuredHeight) / 2).coerceAtLeast(0)
+        source.layout(sourceLeft, paddingTop, sourceLeft + source.measuredWidth, paddingTop + source.measuredHeight)
+        dock.layout(dockLeft, dockTop, dockLeft + dock.measuredWidth, dockTop + dock.measuredHeight)
+    }
+
     override fun dispatchDraw(canvas: Canvas) {
         val source = getChildAt(0)
         val dock = getChildAt(1) as? SectionDockView
