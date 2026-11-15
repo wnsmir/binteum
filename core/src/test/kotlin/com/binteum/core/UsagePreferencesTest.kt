@@ -4,6 +4,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UsagePreferencesTest {
+    @Test fun `manual waiting budgets personalize separately from unknown vehicle ETA`() {
+        val short = event("1", UsageCategory.MUSIC, remaining = null).copy(availableSeconds = 240)
+        val long = event("2", UsageCategory.WALK, remaining = null).copy(availableSeconds = 3600)
+        val history = listOf(short, long)
+        assertEquals(UsageCategory.MUSIC, UsagePreferences.rank(history, 180, 65).first())
+        assertEquals(UsageCategory.WALK, UsagePreferences.rank(history, 2700, 65).first())
+        assertEquals(0, UsagePreferences.matchingChoices(history, UsageCategory.MUSIC, null))
+        assertNull(short.remainingSeconds)
+        assertEquals(ChargeTimeSource.UNKNOWN, short.source)
+    }
+
+    @Test fun `shorter departure or timer limit determines preference bucket without replacing raw ETA`() {
+        val event = event("1", UsageCategory.NAP, remaining = 3600).copy(availableSeconds = 600)
+        assertEquals(UsageCategory.NAP, UsagePreferences.rank(listOf(event), 500, 65).first())
+        assertEquals(1, UsagePreferences.matchingChoices(listOf(event), UsageCategory.NAP, 500))
+        assertEquals(0, UsagePreferences.matchingChoices(listOf(event), UsageCategory.NAP, 3600))
+        assertEquals(3600, event.remainingSeconds)
+    }
+
     private fun event(id: String, category: UsageCategory, remaining: Int? = 600, soc: Int? = 65, simulated: Boolean = false) =
         UsageEvent(id, id.toLongOrNull() ?: 1, category, UsageEntryPoint.MANUAL, remaining,
             if (remaining == null) ChargeTimeSource.UNKNOWN else ChargeTimeSource.VEHICLE, soc, 80, simulated)

@@ -136,6 +136,73 @@ class WaitingFlowProbe : Instrumentation() {
             } catch (error: Throwable) { failure = error.cause ?: error }
 
         }
+        // The nearby screen is now a section deep in one feed. Clearing its selection must
+        // reveal the nearby categories instead of sending the user back to the first video.
+        // Injecting a category directly avoids location permissions, requests and providers.
+        for (useBack in listOf(false, true)) {
+            if (failure != null) break
+            runOnMainSync {
+                try {
+                    val now = System.currentTimeMillis()
+                    set("snapshot", VehicleSnapshot(65, true, false, true, now, 1800, 80, now))
+                    set("status", SessionStatus.CHARGING); set("tab", 0)
+                    set("nearbyKind", com.binteum.app.nearby.NearbyKind.CAFE)
+                    set("nearbyResumeKind", null); set("nearbyResult", null); set("nearbyLoading", false)
+                    set("nearbyNote", "Navigation fixture")
+                    render()
+                } catch (error: Throwable) { failure = error.cause ?: error }
+            }
+            waitForIdleSync()
+            if (failure != null) break
+            val settled = java.util.concurrent.CountDownLatch(1)
+            var stopped = false
+            var returnedToNearby = false
+            runOnMainSync {
+                try {
+                    val before = get("contentScroll") as android.widget.ScrollView
+                    val section = (get("sectionAnchors") as Map<*, *>)[4] as View
+                    val rect = android.graphics.Rect(0, 0, section.width, section.height)
+                    before.offsetDescendantRectToMyCoords(section, rect)
+                    before.scrollTo(0, rect.top)
+                    if (useBack) verify(call("goBack") == true, "back consumes nearby selection")
+                    else descendants(section).filterIsInstance<android.widget.Button>()
+                        .single { it.text.toString() in listOf("다른 종류", "Other categories") }.performClick()
+                    verify(get("nearbyKind") == null, "${if (useBack) "back" else "other categories"} clears selection")
+                    val deadline = SystemClock.elapsedRealtime() + 10_000
+                    var stableFrames = 0
+                    val callback = object : android.view.Choreographer.FrameCallback {
+                        override fun doFrame(frameTimeNanos: Long) {
+                            if (stopped) return
+                            try {
+                                val scroll = get("contentScroll") as android.widget.ScrollView
+                                val nearby = (get("sectionAnchors") as Map<*, *>)[4] as View
+                                if (scroll.isLaidOut && nearby.isLaidOut && scroll.height > 0) {
+                                    val targetRect = android.graphics.Rect(0, 0, nearby.width, nearby.height)
+                                    scroll.offsetDescendantRectToMyCoords(nearby, targetRect)
+                                    val maximum = (scroll.getChildAt(0).height - scroll.height + scroll.paddingTop + scroll.paddingBottom).coerceAtLeast(0)
+                                    val expected = targetRect.top.coerceIn(0, maximum)
+                                    val atNearby = expected > 0 && scroll.scrollY > 0 && kotlin.math.abs(scroll.scrollY - expected) <= 3
+                                    stableFrames = if (atNearby) stableFrames + 1 else 0
+                                    if (stableFrames >= 3) { returnedToNearby = true; stopped = true; settled.countDown(); return }
+                                }
+                                if (SystemClock.elapsedRealtime() >= deadline) { stopped = true; settled.countDown(); return }
+                                android.view.Choreographer.getInstance().postFrameCallback(this)
+                            } catch (error: Throwable) {
+                                failure = error.cause ?: error; stopped = true; settled.countDown()
+                            }
+                        }
+                    }
+                    android.view.Choreographer.getInstance().postFrameCallback(callback)
+                } catch (error: Throwable) { failure = error.cause ?: error; stopped = true; settled.countDown() }
+            }
+            val completed = settled.await(12, java.util.concurrent.TimeUnit.SECONDS)
+            runOnMainSync {
+                stopped = true
+                if (failure == null) try {
+                    verify(completed && returnedToNearby, "${if (useBack) "back" else "other categories"} returns to nearby after layout and scrolling")
+                } catch (error: Throwable) { failure = error.cause ?: error }
+            }
+        }
         if (failure == null) {
             val rendered = java.util.concurrent.CountDownLatch(1)
             var sourceDraws = 0

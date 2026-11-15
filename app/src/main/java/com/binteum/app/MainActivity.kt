@@ -41,6 +41,9 @@ import java.util.UUID
 import kotlin.math.abs
 
 class MainActivity : Activity() {
+    private companion object {
+        val PROCESS_SESSION_TOKEN = UUID.randomUUID().toString()
+    }
     override fun attachBaseContext(base: android.content.Context) {
         val preferences = base.getSharedPreferences("binteum_experience", MODE_PRIVATE)
         val config = Configuration(base.resources.configuration)
@@ -58,6 +61,7 @@ class MainActivity : Activity() {
         outState.putBoolean("targetMode", targetMode)
         outState.putInt("waitMinutes", waitMinutes)
         waitingPlan?.let {
+            outState.putString("waitProcessToken", PROCESS_SESSION_TOKEN)
             outState.putLong("waitStarted", it.startedElapsed)
             outState.putInt("waitDuration", it.durationSeconds ?: -1)
             outState.putInt("waitInitialSoc", it.initialSoc ?: -1)
@@ -238,9 +242,10 @@ class MainActivity : Activity() {
         while (screenHistory.lastOrNull() == tab) screenHistory.removeLast()
         targetMode = savedInstanceState?.getBoolean("targetMode") ?: false
         waitMinutes = savedInstanceState?.getInt("waitMinutes", 20) ?: 20
-        if (savedInstanceState?.containsKey("waitStarted") == true) waitingPlan = WaitingPlan(
-            savedInstanceState.getLong("waitStarted"), savedInstanceState.getInt("waitDuration").takeIf { it > 0 },
-            savedInstanceState.getInt("waitInitialSoc").takeIf { it >= 0 })
+        if (savedInstanceState?.containsKey("waitStarted") == true) waitingPlan = WaitingPlan.restore(
+            savedInstanceState.getString("waitProcessToken"), PROCESS_SESSION_TOKEN,
+            savedInstanceState.getLong("waitStarted"), savedInstanceState.getInt("waitDuration", -1).takeUnless { it == -1 },
+            savedInstanceState.getInt("waitInitialSoc", -1).takeUnless { it == -1 }, SystemClock.elapsedRealtime())
         activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
         themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
         palette = AppTheme.palette(this, themeMode)
@@ -422,13 +427,13 @@ class MainActivity : Activity() {
         return waitingPlan?.budget(available, SystemClock.elapsedRealtime()) ?: available
     }
     private fun refreshMediaGate() {
-        media.setBrowseMode(waitingPlan == null)
+        media.setBrowseMode(true)
         media.updateRecommendations(recommendationSeconds())
         media.setPlaybackAllowed(nap == null && tab == 0 && allowed() && active == null && recovery == null && completed == null, statusText())
     }
     private fun remainingWindowSeconds(): Int = recommendationSeconds() ?: Int.MAX_VALUE
     private fun windowContentKey(): String = listOf(allowed(), chargeEstimate().source, target,
-        UsagePreferences.timeBucket(chargeWindow().seconds), recommendationSeconds()?.let { listOf(it >= 420, it >= 1200, it >= 1800) },
+        UsagePreferences.timeBucket(recommendationSeconds()), recommendationSeconds()?.let { listOf(it >= 420, it >= 1200, it >= 1800) },
         VideoCatalog.recommend(recommendationSeconds()).map { it.id },
         MusicCatalog.recommend(recommendationSeconds()).map { it.name }).joinToString("/")
     private fun remainingActivitySeconds(run: Run): Int {
@@ -782,8 +787,13 @@ class MainActivity : Activity() {
                 fun section(id: Int, build: (LinearLayout) -> Unit) {
                     val section = column().apply { setPadding(0, dp(40), 0, dp(40)) }
                     if (learningOn) {
-                        val category = when (id) { 1 -> UsageCategory.VIDEO; 6 -> UsageCategory.MUSIC; 4 -> UsageCategory.FOOD; else -> UsageCategory.NAP }
-                        if (UsagePreferences.matchingChoices(usageRecords, category, chargeEstimate().seconds) >= 2)
+                        val categories = when (id) {
+                            1 -> listOf(UsageCategory.VIDEO)
+                            6 -> listOf(UsageCategory.MUSIC)
+                            4 -> listOf(UsageCategory.FOOD, UsageCategory.WALK)
+                            else -> listOf(UsageCategory.NAP)
+                        }
+                        if (categories.sumOf { UsagePreferences.matchingChoices(usageRecords, it, recommendationSeconds()) } >= 2)
                             section.addView(label(tx("이 시간대에 자주 선택", "Often chosen for this wait length"), 18f).apply { setTextColor(muted) })
                     }
                     sectionAnchors[id] = section
@@ -879,10 +889,10 @@ class MainActivity : Activity() {
             render()
             return true
         }
-        if (tab == 0 && nearbyKind != null) {
-            cancelNearbyWork(); nearbyKind = null; nearbyResumeKind = null; nearbyNote = ""; render(); return true
-        }
         if (tab == 0 && media.closeOpenContent()) return true
+        if (tab == 0 && nearbyKind != null) {
+            clearNearbySelection(); return true
+        }
         val destination = if (screenHistory.isNotEmpty()) screenHistory.removeLast() else if (tab != 0) 0 else return false
         navigateTo(destination, remember = false)
         return true
@@ -1148,9 +1158,15 @@ class MainActivity : Activity() {
         }
         val actions = row()
         actions.addView(button(tx("다시 검색", "Search again")) { requestNearby(kind, record = false) }, LinearLayout.LayoutParams(-2, -2))
-        actions.addView(button(tx("다른 종류", "Other categories")) { cancelNearbyWork(); nearbyKind = null; nearbyResumeKind = null; nearbyNote = ""; render() },
+        actions.addView(button(tx("다른 종류", "Other categories")) { clearNearbySelection() },
             LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
         parent.addView(actions)
+    }
+
+    private fun clearNearbySelection() {
+        cancelNearbyWork(); nearbyKind = null; nearbyResumeKind = null; nearbyNote = ""
+        render(preserveScroll = true)
+        jumpToSection(4)
     }
 
     private fun requestNearby(kind: NearbyKind, record: Boolean = true) {
@@ -1466,7 +1482,7 @@ class MainActivity : Activity() {
     private fun recordChoice(kind: UsageCategory, entry: UsageEntryPoint, id: String = UUID.randomUUID().toString()): String {
         val estimate = chargeEstimate()
         val event = UsageEvent(id, System.currentTimeMillis(), kind, entry, estimate.seconds, estimate.source,
-            snapshot?.stateOfCharge, target, demoMode)
+            snapshot?.stateOfCharge, target, demoMode, availableSeconds = recommendationSeconds())
         usageStore.save(event)
         usageRecords = UsagePreferences.record(usageRecords, event, 4000)
         return id
@@ -1657,18 +1673,18 @@ class MainActivity : Activity() {
     private fun buildHistorySettings(parent: ViewGroup) {
         val history = surfaceCard()
         history.addView(sectionTitle(tx("선택 기록과 추천", "Choice history and recommendations"), AppIcon.SPARKLES))
-        history.addView(label(tx("활동을 선택할 때마다 남은 충전시간·예측 출처·충전량·목표·직접/추천 선택을 이 기기에 저장해요. 자체 활동은 마침·중단도 기록해요.",
-            "Every choice saves remaining charging time, its source, battery level, goal and direct/recommended entry on this device. App-owned activities also record completion or interruption."), 21f))
+        history.addView(label(tx("선택할 때의 사용 가능 시간과 충전 예상시간·출처·충전량·목표를 이 기기에 저장해요. 사용 가능 시간에는 직접 정한 대기시간과 출발 시각도 반영해요.",
+            "Each choice saves available time, the separate charge estimate and source, battery level and goal on this device. Available time also reflects your waiting duration and departure time."), 21f))
         history.addView(label(tx("영상·음악의 제목이나 재생 이력은 저장하지 않아요. 음악 서비스 열기는 재생 완료로 기록하지 않아요. 시연 기록은 실제 선호도 학습에서 제외해요.",
             "Video and music titles or playback history are not stored. Opening music does not record playback completion. Demo choices do not train preferences."), 19f).apply { setTextColor(muted) })
-        history.addView(settingSwitch(tx("기록으로 추천 순서 맞추기", "Personalize recommendation order"),
-            tx("선택 기록은 계속 저장되며, 이 설정은 추천에 사용하는지만 바꿔요.", "Choices keep being saved; this controls whether they affect recommendations."), learningOn) {
+        history.addView(settingSwitch(tx("선택 기록으로 선호 표시", "Show preferences from choice history"),
+            tx("비슷한 남은 시간에 자주 선택한 기능을 표시해요. 꺼도 선택 기록은 계속 저장해요.", "Highlight features you often choose with similar time remaining. Choices keep being saved when this is off."), learningOn) {
             learningOn = it; prefs.edit().putBoolean("learningOn", it).apply()
         })
         history.addView(label(tx("저장된 선택 ${usageStore.count()}개 · 최근 기록", "${usageStore.count()} saved choices · recent history"), 24f, true))
         usageRecords.takeLast(5).asReversed().forEach { event ->
             val whenText = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(event.atMillis))
-            val left = event.remainingSeconds?.let { tx("${(it + 59) / 60}분 남음", "${(it + 59) / 60} min left") } ?: tx("시간 미확인", "Time unknown")
+            val left = event.availableSeconds?.let { tx("${(it + 59) / 60}분 사용 가능", "${(it + 59) / 60} min available") } ?: tx("시간 미확인", "Time unknown")
             val entry = if (event.entryPoint == UsageEntryPoint.RECOMMENDED) tx("추천", "Recommended") else tx("직접", "Direct")
             val result = if (event.completed == true) tx(" · 마침", " · completed") else if (event.completed == false) tx(" · 중단", " · interrupted") else ""
             history.addView(label("$whenText · ${categoryTitle(event.category)} · $left · ${event.stateOfCharge?.let { "$it%" } ?: "—"} · $entry$result${if (event.simulation) tx(" · 시연", " · demo") else ""}", 19f))

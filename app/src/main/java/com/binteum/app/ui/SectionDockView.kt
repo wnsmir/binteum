@@ -74,6 +74,20 @@ class SectionDockView(context: Context, private val palette: AppPalette, private
         icon.animate().scaleX(scale).scaleY(scale)
             .setDuration(if (android.animation.ValueAnimator.areAnimatorsEnabled()) 90 else 0).start()
     }
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            // Hidden labels retain their measured width to keep scrolling stable, but
+            // must not cover the underlying content with an invisible touch target.
+            val hitsVisibleControl = entries.any { entry ->
+                val target = if (entry.item.id == activeId) entry.row else entry.icon
+                val rect = android.graphics.Rect(0, 0, target.width, target.height)
+                offsetDescendantRectToMyCoords(target, rect)
+                rect.contains(event.x.toInt(), event.y.toInt())
+            }
+            if (!hitsVisibleControl) return false
+        }
+        return super.dispatchTouchEvent(event)
+    }
     fun setActive(id: Int?) {
         if (activeId == id) return
         activeId = id

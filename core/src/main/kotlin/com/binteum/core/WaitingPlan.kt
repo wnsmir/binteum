@@ -18,4 +18,23 @@ data class WaitingPlan(val startedElapsed: Long, val durationSeconds: Int?, val 
         if (soc == null) 0f else if (soc >= target) 1f else
             ((soc - start).toFloat() / (target - start).coerceAtLeast(1)).coerceIn(0f, 1f)
     }
+
+    companion object {
+        /**
+         * Activity recreation may retain a plan, but an OS-restored Bundle from an earlier
+         * process must not restart one. The host creates one random token per process and
+         * saves it with the plan. Reject future/invalid elapsed timestamps as well, since
+         * elapsed realtime has no meaning across a device restart.
+         */
+        fun restore(
+            savedProcessToken: String?, currentProcessToken: String,
+            startedElapsed: Long, durationSeconds: Int?, initialSoc: Int?, nowElapsed: Long,
+        ): WaitingPlan? {
+            if (currentProcessToken.isBlank() || savedProcessToken != currentProcessToken ||
+                startedElapsed < 0 || nowElapsed < startedElapsed ||
+                (durationSeconds != null && durationSeconds <= 0) ||
+                (initialSoc != null && initialSoc !in 0..100)) return null
+            return WaitingPlan(startedElapsed, durationSeconds, initialSoc)
+        }
+    }
 }

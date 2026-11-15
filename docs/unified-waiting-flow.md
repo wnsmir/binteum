@@ -38,3 +38,11 @@ App-window PixelCopy captures were inspected for the current sleep layout. Swipe
 ## Scroll flicker regression
 
 The former blur path redrew a live ScrollView onto a mutable software bitmap while the hardware renderer also consumed it. It has been replaced by GPU display-list replay. Dock label geometry is stable to avoid remeasuring the scroll host at section boundaries. A 24-frame emulator fixture checks that content is drawn on hardware canvases only, frame rendering continues, and source/dock layout sizes remain stable. These automated checks do not replace visual review of the reported flicker on the user's screen.
+
+## Integration fixes — 2026-11-15
+
+- Video choices remain directly accessible before, during and after the selected waiting duration; duration-fit advice and fresh charging/vehicle safety checks remain separate. A short or zero recommendation budget does not remove the catalog.
+- Nearby **Other categories** and Back restore the nearby section after layout instead of jumping to the first video. An open video consumes Back before a retained nearby selection.
+- Inactive dock labels keep their measured bounds for stable layout, but their invisible area passes touch through to the content. Active labels and inactive icons remain actionable, including keyboard/accessibility clicks.
+- Waiting-plan saved state is bound to a process token. Activity recreation within that process keeps the original monotonic deadline. A fresh process, older saved state without a token, or invalid/reset monotonic clock returns to setup.
+- Choice history v2 stores the effective available seconds separately from the raw charge ETA/source. Familiar-choice indicators use the available-time bucket, including a shorter timer or departure deadline; nearby indicators include food and walking choices. Existing rows retain their recorded charge context, and unknown historical limits are not reconstructed. The settings label describes preference indicators rather than claiming that the fixed section order is personalized.

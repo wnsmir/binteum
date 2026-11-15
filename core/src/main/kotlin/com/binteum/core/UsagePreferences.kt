@@ -30,6 +30,8 @@ data class UsageEvent(
     val durationSeconds: Int? = null,
     val completed: Boolean? = null,
     val rating: ActivityRating? = null,
+    /** Effective time available at selection, after waiting/departure limits. Raw charge ETA stays above. */
+    val availableSeconds: Int? = remainingSeconds,
 )
 
 object UsagePreferences {
@@ -67,7 +69,7 @@ object UsagePreferences {
         val band = chargeBand(stateOfCharge)
         val eligible = events.asReversed().distinctBy { it.id }.filter { !it.simulation && it.id.isNotBlank() }
         val scores = categories.associateWith { category ->
-            eligible.asSequence().filter { it.category == category && timeBucket(it.remainingSeconds) == bucket }
+            eligible.asSequence().filter { it.category == category && timeBucket(it.availableSeconds) == bucket }
                 .sumOf { event ->
                     // Unknown durations form their own bucket; never teach a "short wait" preference.
                     val sameCharge = chargeBand(event.stateOfCharge) == band
@@ -86,6 +88,6 @@ object UsagePreferences {
 
     fun matchingChoices(events: List<UsageEvent>, category: UsageCategory, remainingSeconds: Int?): Int =
         events.asReversed().distinctBy { it.id }.count {
-            !it.simulation && it.id.isNotBlank() && it.category == category && timeBucket(it.remainingSeconds) == timeBucket(remainingSeconds)
+            !it.simulation && it.id.isNotBlank() && it.category == category && timeBucket(it.availableSeconds) == timeBucket(remainingSeconds)
         }
 }
