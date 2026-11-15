@@ -60,16 +60,13 @@ object AppTheme {
         warning = 0xFF8A4700.toInt(), warningSurface = 0xFFFFE9CD.toInt(), flat = true)
 
     fun palette(context: Context, mode: ThemeMode, backgroundMode: BackgroundMode = BackgroundMode.SYSTEM): AppPalette {
-        if (backgroundMode == BackgroundMode.SYSTEM) return if (context.resources.configuration.uiMode and
-            Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES) black else white
-        if (backgroundMode == BackgroundMode.BLACK) return black
-        if (backgroundMode == BackgroundMode.WHITE) return white
         val useDark = when (mode) {
             ThemeMode.DARK -> true
             ThemeMode.LIGHT -> false
             ThemeMode.SYSTEM -> context.resources.configuration.uiMode and
                 Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         }
+        if (backgroundMode.isFlat) return if (useDark) black else white
         return if (useDark) dark else light
     }
 }

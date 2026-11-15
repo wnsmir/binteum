@@ -29,5 +29,5 @@
     <string name="recent_content">"최근 콘텐츠 · %1$s"</string>
     <string name="server_error">"서버 응답 오류 %1$d. 다시 열기를 눌러 주세요."</string>
     <string name="video_error">"영상 재생 오류 (%1$s). 다시 열기를 눌러 주세요."</string>
-    <string name="sky_system">시스템 설정 (기본)</string>
+    <string name="sky_system">단색 (화면 모드 따름)</string>
 </resources>

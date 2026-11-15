@@ -256,11 +256,7 @@ class MainActivity : Activity() {
             savedInstanceState.getLong("waitStarted"), savedInstanceState.getInt("waitDuration", -1).takeUnless { it == -1 },
             savedInstanceState.getInt("waitInitialSoc", -1).takeUnless { it == -1 }, SystemClock.elapsedRealtime())
         activityReturnScroll = savedInstanceState?.getInt("activityReturnScroll", 0) ?: 0
-        themeMode = runCatching { ThemeMode.valueOf(prefs.getString("themeMode", "DARK") ?: "DARK") }.getOrDefault(ThemeMode.SYSTEM)
-        palette = AppTheme.palette(this, themeMode)
-        backgroundMode = runCatching {
-            BackgroundMode.valueOf(prefs.getString("backgroundMode", "SYSTEM") ?: "SYSTEM")
-        }.getOrDefault(BackgroundMode.SYSTEM)
+        loadAppearance()
         backgroundMotion = prefs.getBoolean("backgroundMotion", true)
         panelOnRight = prefs.getBoolean("panelOnRight", false)
         tocOnRight = prefs.getBoolean("tocOnRight", true)
@@ -361,7 +357,6 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        palette = AppTheme.palette(this, themeMode)
         render(preserveScroll = true)
     }
 
@@ -1701,8 +1696,8 @@ class MainActivity : Activity() {
         val background = surfaceCard()
         background.addView(sectionTitle(getString(com.binteum.app.R.string.ui_text_087), AppIcon.SUN))
         background.addView(settingRow(getString(com.binteum.app.R.string.ui_text_088), getString(com.binteum.app.R.string.ui_text_089), backgroundTitle(backgroundMode)) {
-            val modes = BackgroundMode.values()
-            chooseSetting(getString(com.binteum.app.R.string.ui_text_088), modes.map { backgroundTitle(it) }, backgroundMode.ordinal) {
+            val modes = BackgroundMode.entries.filterNot { it == BackgroundMode.BLACK || it == BackgroundMode.WHITE }
+            chooseSetting(getString(com.binteum.app.R.string.ui_text_088), modes.map { backgroundTitle(it) }, modes.indexOf(backgroundMode).coerceAtLeast(0)) {
                 backgroundMode = modes[it]
                 prefs.edit().putString("backgroundMode", backgroundMode.name).apply()
                 render(preserveScroll = true)
@@ -1904,11 +1899,31 @@ class MainActivity : Activity() {
         addView(control, LinearLayout.LayoutParams(dp(80), -2).apply { marginStart = dp(20) })
     }
 
+    private fun loadAppearance() {
+        val savedTheme = prefs.getString("themeMode", null)?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
+        val savedBackground = runCatching {
+            BackgroundMode.valueOf(prefs.getString("backgroundMode", "SYSTEM") ?: "SYSTEM")
+        }.getOrDefault(BackgroundMode.SYSTEM)
+        // The explicit screen mode wins. Older flat background choices supply a mode only
+        // when no screen mode was saved, then become the shared flat background style.
+        themeMode = savedTheme ?: when (savedBackground) {
+            BackgroundMode.BLACK -> ThemeMode.DARK
+            BackgroundMode.WHITE -> ThemeMode.LIGHT
+            else -> ThemeMode.DARK
+        }
+        backgroundMode = if (savedBackground.isFlat) BackgroundMode.SYSTEM else savedBackground
+        if (backgroundMode != savedBackground) {
+            prefs.edit().putString("themeMode", themeMode.name).putString("backgroundMode", backgroundMode.name).apply()
+        }
+        palette = AppTheme.palette(this, themeMode, backgroundMode)
+    }
+
     private fun changeTheme(mode: ThemeMode) {
-        if (mode == themeMode) return
+        val nextBackground = if (backgroundMode.isFlat) BackgroundMode.SYSTEM else backgroundMode
+        if (mode == themeMode && nextBackground == backgroundMode) return
         themeMode = mode
-        prefs.edit().putString("themeMode", mode.name).apply()
-        palette = AppTheme.palette(this, mode)
+        backgroundMode = nextBackground
+        prefs.edit().putString("themeMode", mode.name).putString("backgroundMode", backgroundMode.name).apply()
         render(preserveScroll = true)
     }
 
